@@ -151,3 +151,48 @@ fn differential_static_source_inclusion() {
     let _ = std::fs::remove_dir_all(&dir);
     res.expect("static source inclusion match");
 }
+
+#[test]
+fn differential_static_source_early_return() {
+    let dir = std::env::temp_dir().join(format!("bash2rust_static_ret_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let lib = dir.join("lib_ret.sh");
+    let main = dir.join("main_ret.sh");
+    std::fs::write(&lib, "BEFORE_RET=\"yes\"\nreturn 0\nAFTER_RET=\"no\"\n")
+        .expect("write lib_ret");
+    std::fs::write(
+        &main,
+        format!(
+            "#!/usr/bin/env bash\nsource \"{}\"\necho \"before=$BEFORE_RET:after=${{AFTER_RET:-unset}}\"\n",
+            lib.display()
+        ),
+    )
+    .expect("write main_ret");
+    let res = assert_differential_match(&main);
+    let _ = std::fs::remove_dir_all(&dir);
+    res.expect("static source early return match");
+}
+
+#[test]
+fn differential_redirected_source() {
+    let dir = std::env::temp_dir().join(format!("bash2rust_redir_src_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let helper = dir.join("helper_redir.sh");
+    let main = dir.join("main_redir.sh");
+    let out_file = dir.join("src_out.txt");
+    std::fs::write(&helper, "echo \"from_redir_src\"\nREDIR_VAR=\"ok\"\n")
+        .expect("write helper_redir");
+    std::fs::write(
+        &main,
+        format!(
+            "#!/usr/bin/env bash\np=\"{}\"\nsource \"$p\" > \"{}\" 2>/dev/null\necho \"var=$REDIR_VAR:file=$(cat \"{}\")\"\n",
+            helper.display(),
+            out_file.display(),
+            out_file.display()
+        ),
+    )
+    .expect("write main_redir");
+    let res = assert_differential_match(&main);
+    let _ = std::fs::remove_dir_all(&dir);
+    res.expect("redirected source match");
+}

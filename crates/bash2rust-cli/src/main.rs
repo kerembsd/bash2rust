@@ -103,11 +103,7 @@ fn build_ai_provider(cli: &Cli) -> Result<Option<Box<dyn AiProvider>>> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let source = std::fs::read_to_string(&cli.file)
-        .with_context(|| format!("failed to read Bash script `{}`", cli.file.display()))?;
-    let source_name = cli.file.display().to_string();
-
-    let mut output = bash2rust_core::compile_str_to_ir(&source, source_name)
+    let mut output = bash2rust_core::compile_file_to_ir(&cli.file)
         .with_context(|| format!("failed to compile `{}`", cli.file.display()))?;
 
     let ai_provider = build_ai_provider(&cli)?;

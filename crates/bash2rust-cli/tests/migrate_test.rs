@@ -131,3 +131,32 @@ fn cli_default_ir_and_emit_rust_modes_work() {
     let rust_stdout = String::from_utf8_lossy(&rust_out.stdout);
     assert!(rust_stdout.contains("fn main()"));
 }
+
+#[test]
+fn cli_emit_rust_resolves_static_source() {
+    let bin = env!("CARGO_BIN_EXE_bash2rust");
+    let dir = std::env::temp_dir().join(format!("bash2rust_cli_src_{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let lib = dir.join("lib.sh");
+    let main = dir.join("main.sh");
+    fs::write(&lib, "STATIC_LIB_VAR=\"hello_static\"\n").expect("write lib.sh");
+    fs::write(
+        &main,
+        "#!/usr/bin/env bash\nsource ./lib.sh\necho \"$STATIC_LIB_VAR\"\n",
+    )
+    .expect("write main.sh");
+
+    let rust_out = Command::new(bin)
+        .arg("--file")
+        .arg(&main)
+        .args(["--emit", "rust"])
+        .output()
+        .expect("run --emit rust with static source");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(rust_out.status.success());
+    let rust_stdout = String::from_utf8_lossy(&rust_out.stdout);
+    assert!(
+        rust_stdout.contains("hello_static") && !rust_stdout.contains("source_file("),
+        "expected static source inlining, got:\n{rust_stdout}"
+    );
+}

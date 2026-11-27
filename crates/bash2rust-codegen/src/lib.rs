@@ -34,6 +34,7 @@ struct Scope {
     vars: HashMap<String, VarBinding>,
     used_idents: HashSet<String>,
     in_function: bool,
+    in_source: bool,
     unguarded: bool,
     source_name: String,
     functions: HashMap<String, syn::Ident>,
@@ -49,6 +50,7 @@ impl Scope {
             vars: HashMap::new(),
             used_idents: HashSet::new(),
             in_function,
+            in_source: false,
             unguarded: false,
             source_name: source_name.to_owned(),
             functions: HashMap::new(),
@@ -60,6 +62,7 @@ impl Scope {
             vars: HashMap::new(),
             used_idents: HashSet::new(),
             in_function,
+            in_source: false,
             unguarded: false,
             source_name: ctx.source_name.clone(),
             functions: ctx.functions.clone(),
@@ -469,7 +472,10 @@ fn emit_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStream {
                         }
                     }
                 }
+                let saved_in_source = scope.in_source;
+                scope.in_source = true;
                 let inner = emit_block_with(ctx, scope, inc_block);
+                scope.in_source = saved_in_source;
                 let errexit_stmt = if scope.unguarded {
                     quote! {}
                 } else {
@@ -671,7 +677,7 @@ fn emit_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStream {
 }
 
 fn emit_return_stmt(scope: &Scope, code: Option<&Word>) -> TokenStream {
-    if scope.in_function {
+    if scope.in_function || scope.in_source {
         match code {
             None => quote! { return Ok(()); },
             Some(w) => {

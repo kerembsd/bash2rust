@@ -1180,10 +1180,28 @@ impl ShellState {
                 self.emit_builtin_output("", redirects)?;
                 Ok(Some(0))
             }
+            "source" | "." => {
+                let Some(path) = args.first().copied() else {
+                    self.emit_builtin_stderr(
+                        "bash: source: filename argument required\n",
+                        redirects,
+                    );
+                    return Ok(Some(2));
+                };
+                if redirects.is_empty() {
+                    let rc = self.source_file(path, &args[1..])?;
+                    return Ok(Some(rc));
+                }
+                self.push_stdout_capture();
+                let res = self.source_file(path, &args[1..]);
+                let captured = self.pop_stdout_capture_raw();
+                let rc = res?;
+                self.apply_captured_redirects(&captured, redirects)?;
+                Ok(Some(rc))
+            }
             "hash" | "ulimit" | "shopt" | "enable" | "wait" | "jobs" | "times" | "dirs"
             | "shift" | "break" | "continue" | "exec" | "mapfile" | "readarray" | "pushd"
-            | "popd" | "getopts" | "source" | "." | "alias" | "unalias" | "bg" | "fg"
-            | "disown" => {
+            | "popd" | "getopts" | "alias" | "unalias" | "bg" | "fg" | "disown" => {
                 self.emit_builtin_output("", redirects)?;
                 Ok(Some(0))
             }
@@ -4073,6 +4091,19 @@ mod tests {
         assert_eq!(sh.get_var("A"), Some("1"));
         assert_eq!(sh.get_var("B"), Some("2"));
         assert!(sh.source_stack.is_empty());
+
+        let redir_rc = sh
+            .run_command_with_redirects(
+                "source",
+                &[a.to_str().unwrap()],
+                &[],
+                &[RedirectSpec {
+                    fd: 2,
+                    mode: RedirectMode::OutputTruncate("/dev/null"),
+                }],
+            )
+            .unwrap();
+        assert_eq!(redir_rc, 1);
         let _ = std::fs::remove_dir_all(&dir);
 
         sh.set_var("orig", "init");
