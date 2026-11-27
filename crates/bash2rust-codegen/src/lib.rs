@@ -453,6 +453,25 @@ fn emit_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStream {
                         }
                     })
                     .collect();
+                let has_stdin_redir = block.redirects.iter().any(|r| {
+                    r.fd == Some(0)
+                        || (r.fd.is_none()
+                            && matches!(
+                                r.kind,
+                                RedirectKind::Input
+                                    | RedirectKind::HereDoc { .. }
+                                    | RedirectKind::HereString
+                                    | RedirectKind::InputProcSubst
+                            ))
+                });
+                let (save_stdin, restore_stdin) = if has_stdin_redir {
+                    (
+                        quote! { let __saved_stdin = __shell.take_stdin_override(); },
+                        quote! { __shell.set_stdin_override(__saved_stdin); },
+                    )
+                } else {
+                    (quote! {}, quote! {})
+                };
                 let (pre_redir, post_redir) = if block.redirects.is_empty() {
                     (quote! {}, quote! {})
                 } else {
@@ -480,7 +499,7 @@ fn emit_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStream {
                     {
                         let __saved_cwd = std::env::current_dir().ok();
                         let __saved_vars = __shell.vars_snapshot();
-                        let __saved_stdin = __shell.take_stdin_override();
+                        #save_stdin
                         let __saved_opts = (
                             __shell.errexit,
                             __shell.nounset,
@@ -504,7 +523,7 @@ fn emit_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStream {
                             let _ = std::env::set_current_dir(__d);
                         }
                         #post_redir
-                        __shell.set_stdin_override(__saved_stdin);
+                        #restore_stdin
                         if let Err(__e) = __sub_res {
                             if let Some(bash2rust_runtime::RuntimeError::SubshellExit(__code)) =
                                 __e.downcast_ref::<bash2rust_runtime::RuntimeError>()

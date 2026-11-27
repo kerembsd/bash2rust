@@ -112,3 +112,18 @@ fn differential_redirected_subshell_early_exit() {
     let _ = std::fs::remove_dir_all(&dir);
     res.expect("redirected subshell early exit match");
 }
+
+#[test]
+fn differential_piped_fn_with_subshell() {
+    let dir = std::env::temp_dir().join(format!("bash2rust_piped_sub_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let script = dir.join("piped_sub.sh");
+    std::fs::write(
+        &script,
+        "#!/usr/bin/env bash\nfn_sub() {\n    ( read -r line; echo \"got:$line\" )\n}\necho \"hello_pipe\" | fn_sub\n",
+    )
+    .expect("write script");
+    let res = assert_differential_match(&script);
+    let _ = std::fs::remove_dir_all(&dir);
+    res.expect("piped fn with subshell match");
+}
