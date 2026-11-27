@@ -358,6 +358,42 @@ fn collect_from_word(word: &Word, out: &mut Vec<String>) {
                 ..
             } => collect_from_word(index, out),
             WordPart::ParamExpansion {
+                op: ParamExpansionOp::ArrayElemTrim { index, pattern, .. },
+                ..
+            } => {
+                collect_from_word(index, out);
+                collect_from_word(pattern, out);
+            }
+            WordPart::ParamExpansion {
+                op:
+                    ParamExpansionOp::ArrayElemReplace {
+                        index,
+                        pattern,
+                        replacement,
+                        ..
+                    },
+                ..
+            } => {
+                collect_from_word(index, out);
+                collect_from_word(pattern, out);
+                collect_from_word(replacement, out);
+            }
+            WordPart::ParamExpansion {
+                op:
+                    ParamExpansionOp::ArrayElemSubstring {
+                        index,
+                        offset,
+                        length,
+                    },
+                ..
+            } => {
+                collect_from_word(index, out);
+                collect_from_word(offset, out);
+                if let Some(len) = length {
+                    collect_from_word(len, out);
+                }
+            }
+            WordPart::ParamExpansion {
                 op: ParamExpansionOp::Trim { pattern, .. },
                 ..
             } => collect_from_word(pattern, out),

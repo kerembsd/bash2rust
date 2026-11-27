@@ -125,6 +125,7 @@ fn is_file_op(op: &str) -> Option<FileTestOp> {
         "-c" => Some(FileTestOp::CharDevice),
         "-x" => Some(FileTestOp::Executable),
         "-t" => Some(FileTestOp::FdIsTerminal),
+        "-O" => Some(FileTestOp::OwnedByEffectiveUser),
         _ => None,
     }
 }
@@ -149,6 +150,14 @@ fn is_binary_op(op: &str) -> Option<BinaryTestOp> {
         "-ge" => Some(BinaryTestOp::IntGe),
         "=~" => Some(BinaryTestOp::RegexMatch),
         _ => None,
+    }
+}
+
+fn is_fully_quoted(word: &Word) -> bool {
+    if word.parts.is_empty() {
+        word.has_quotes
+    } else {
+        !word.part_quoted.is_empty() && word.part_quoted.iter().all(|&q| q)
     }
 }
 
@@ -214,6 +223,10 @@ pub(crate) fn lower_extended_test(
                 op: FileTestOp::FdIsTerminal,
                 path: lower_word(word),
             }),
+            ast::UnaryPredicate::FileExistsAndOwnedByEffectiveUserId => Some(TestExpr::FileTest {
+                op: FileTestOp::OwnedByEffectiveUser,
+                path: lower_word(word),
+            }),
             ast::UnaryPredicate::StringHasZeroLength => Some(TestExpr::Unary {
                 op: UnaryTestOp::StrEmpty,
                 operand: lower_word(word),
@@ -237,7 +250,7 @@ pub(crate) fn lower_extended_test(
                 }
             }
             if matches!(pred, ast::BinaryPredicate::StringDoesNotExactlyMatchPattern) {
-                if rhs_word.has_quotes {
+                if is_fully_quoted(&rhs_word) {
                     return Some(TestExpr::Binary {
                         op: BinaryTestOp::StrNe,
                         lhs: lhs_word,
@@ -253,7 +266,7 @@ pub(crate) fn lower_extended_test(
             let op = match pred {
                 ast::BinaryPredicate::StringExactlyMatchesString => BinaryTestOp::StrEq,
                 ast::BinaryPredicate::StringExactlyMatchesPattern => {
-                    if rhs_word.has_quotes {
+                    if is_fully_quoted(&rhs_word) {
                         BinaryTestOp::StrEq
                     } else {
                         BinaryTestOp::PatternMatch

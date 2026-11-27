@@ -161,6 +161,7 @@ pub struct ShellState {
     pub last_arg: String,
     pub func_stack: Vec<String>,
     pub argv_counts: Vec<usize>,
+    pub fn_overrides: HashMap<String, String>,
     pub fn_dispatcher: Option<FnDispatcher>,
     pub exit_trap: Option<String>,
     pub int_trap: Option<String>,
@@ -200,6 +201,7 @@ impl Default for ShellState {
             last_arg: std::env::args().next().unwrap_or_default(),
             func_stack: Vec::new(),
             argv_counts: Vec::new(),
+            fn_overrides: HashMap::new(),
             fn_dispatcher: None,
             exit_trap: None,
             int_trap: None,
@@ -216,6 +218,17 @@ impl ShellState {
     /// Registers the generated dynamic function dispatcher for trap callbacks.
     pub fn set_fn_dispatcher(&mut self, dispatcher: FnDispatcher) {
         self.fn_dispatcher = Some(dispatcher);
+    }
+
+    /// Overrides the active implementation name for a conditionally redefined Bash function.
+    pub fn set_fn_override(&mut self, bash_name: &str, impl_name: &str) {
+        self.fn_overrides
+            .insert(bash_name.to_owned(), impl_name.to_owned());
+    }
+
+    /// Returns the active implementation name for a conditionally redefined Bash function, if any.
+    pub fn get_fn_override(&self, bash_name: &str) -> Option<&str> {
+        self.fn_overrides.get(bash_name).map(String::as_str)
     }
 
     /// Registers compiled Bash function names for `declare -F`.
@@ -731,8 +744,66 @@ impl ShellState {
         if trimmed.is_empty() {
             return 0;
         }
+        if trimmed.contains("$(") {
+            let expanded = self.expand_arith_cmd_subst(trimmed);
+            let mut parser = ArithParser::new(&expanded, self);
+            return parser.parse_comma();
+        }
         let mut parser = ArithParser::new(trimmed, self);
         parser.parse_comma()
+    }
+
+    fn expand_arith_cmd_subst(&mut self, expr: &str) -> String {
+        let bytes = expr.as_bytes();
+        let mut out = String::with_capacity(expr.len());
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b'$'
+                && i + 1 < bytes.len()
+                && bytes[i + 1] == b'('
+                && !(i + 2 < bytes.len() && bytes[i + 2] == b'(')
+            {
+                let mut depth = 1usize;
+                let mut j = i + 2;
+                let mut in_single = false;
+                let mut in_double = false;
+                while j < bytes.len() && depth > 0 {
+                    let b = bytes[j];
+                    if b == b'\\' && !in_single && j + 1 < bytes.len() {
+                        j += 2;
+                        continue;
+                    }
+                    if b == b'\'' && !in_double {
+                        in_single = !in_single;
+                    } else if b == b'"' && !in_single {
+                        in_double = !in_double;
+                    } else if !in_single && !in_double {
+                        if b == b'(' {
+                            depth += 1;
+                        } else if b == b')' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    j += 1;
+                }
+                if depth == 0 {
+                    let inner = &expr[i + 2..j];
+                    self.push_stdout_capture();
+                    let _ = self.eval_bash_str(inner);
+                    let captured = self.pop_stdout_capture();
+                    out.push_str(captured.trim());
+                    i = j + 1;
+                    continue;
+                }
+            }
+            let ch = expr[i..].chars().next().expect("valid char");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+        out
     }
 
     /// Pushes a new in-process stdout capture buffer onto the stack (for `$(func)` / pipelines).
@@ -865,6 +936,19 @@ impl ShellState {
         self.run_command_with_redirects(program, args, env, &[])
     }
 
+    fn build_command(&self, program: &str) -> Command {
+        if !program.contains('/') {
+            if let Some(shell_path) = self.vars.get("PATH") {
+                let resolved = find_in_path_with(program, Some(shell_path), false)
+                    .unwrap_or_else(|| program.to_owned());
+                let mut cmd = Command::new(resolved);
+                cmd.env("PATH", shell_path);
+                return cmd;
+            }
+        }
+        Command::new(program)
+    }
+
     /// Executes `program` with `args`, `env`, and `redirects`, honoring active `stdout_capture_stack` and `stdin_override`.
     pub fn run_command_with_redirects(
         &mut self,
@@ -892,10 +976,25 @@ impl ShellState {
             !self.stdout_capture_stack.is_empty() && !redirects.iter().any(|r| r.fd == 1);
 
         if stdin_data.is_none() && !capture_stdout {
+            let resolved_prog;
+            let mut env_with_path: Vec<(&str, &str)> = Vec::new();
+            let (prog_to_run, env_to_use) =
+                if !program.contains('/') && self.vars.contains_key("PATH") {
+                    let shell_path = self.vars.get("PATH").map(String::as_str).unwrap_or("");
+                    resolved_prog = find_in_path_with(program, Some(shell_path), false)
+                        .unwrap_or_else(|| program.to_owned());
+                    env_with_path.extend_from_slice(env);
+                    if !env.iter().any(|(k, _)| *k == "PATH") {
+                        env_with_path.push(("PATH", shell_path));
+                    }
+                    (resolved_prog.as_str(), env_with_path.as_slice())
+                } else {
+                    (program, env)
+                };
             let status = if redirects.is_empty() {
-                run_command_env(program, args, env)?
+                run_command_env(prog_to_run, args, env_to_use)?
             } else {
-                run_command_with_redirects(program, args, env, redirects)?
+                run_command_with_redirects(prog_to_run, args, env_to_use, redirects)?
             };
             let rc = Self::exit_code_from_status(&status);
             self.set_status(rc);
@@ -903,7 +1002,7 @@ impl ShellState {
             return Ok(self.last_status);
         }
 
-        let mut cmd = Command::new(program);
+        let mut cmd = self.build_command(program);
         cmd.args(args);
         for (k, v) in env {
             cmd.env(k, v);
@@ -2988,6 +3087,17 @@ fn glob_match_chars(pat: &[char], txt: &[char]) -> bool {
             } else {
                 return false;
             }
+        } else if pi + 1 < pat.len() && pat[pi] == '\\' {
+            if pat[pi + 1] == txt[ti] {
+                pi += 2;
+                ti += 1;
+            } else if let Some(sp) = star_pi {
+                pi = sp + 1;
+                star_ti += 1;
+                ti = star_ti;
+            } else {
+                return false;
+            }
         } else if pi < pat.len() && pat[pi] == txt[ti] {
             pi += 1;
             ti += 1;
@@ -3365,6 +3475,8 @@ impl ShellState {
     ) -> RuntimeResult<String> {
         let mut fd3_to_stdout = false;
         let mut fd2_to_fd3 = false;
+        let mut fd2_to_fd1 = false;
+        let mut fd2_path: Option<(&str, bool)> = None;
         let mut fd1_path: Option<(&str, bool)> = None;
         let mut fd0_path: Option<&str> = None;
         let mut fd0_bytes: Option<&[u8]> = None;
@@ -3381,6 +3493,9 @@ impl ShellState {
                 }
                 (1, RedirectMode::OutputTruncate(path)) => fd1_path = Some((path, false)),
                 (1, RedirectMode::OutputAppend(path)) => fd1_path = Some((path, true)),
+                (2, RedirectMode::OutputTruncate(path)) => fd2_path = Some((path, false)),
+                (2, RedirectMode::OutputAppend(path)) => fd2_path = Some((path, true)),
+                (2, RedirectMode::DupOutput { target_fd: 1 }) => fd2_to_fd1 = true,
                 (3, RedirectMode::DupOutput { target_fd: 1 }) => fd3_to_stdout = true,
                 (2, RedirectMode::DupOutput { target_fd: 3 }) => fd2_to_fd3 = true,
                 _ => {}
@@ -3388,7 +3503,7 @@ impl ShellState {
         }
 
         let capture_stderr = fd3_to_stdout && fd2_to_fd3;
-        let mut cmd = Command::new(program);
+        let mut cmd = self.build_command(program);
         cmd.args(args);
 
         if let Some(path) = fd0_path {
@@ -3425,7 +3540,24 @@ impl ShellState {
             cmd.stderr(Stdio::piped());
         } else {
             cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::inherit());
+            if fd2_to_fd1 {
+                cmd.stderr(Stdio::piped());
+            } else if let Some((path, append)) = fd2_path {
+                let file = if append {
+                    OpenOptions::new().create(true).append(true).open(path)
+                } else if path == "/dev/tty" {
+                    OpenOptions::new().write(true).open(path)
+                } else {
+                    File::create(path)
+                }
+                .map_err(|source| RuntimeError::Io {
+                    program: path.to_owned(),
+                    source,
+                })?;
+                cmd.stderr(Stdio::from(file));
+            } else {
+                cmd.stderr(Stdio::inherit());
+            }
         }
 
         let mut child = cmd.spawn().map_err(|source| RuntimeError::Io {
@@ -3448,6 +3580,10 @@ impl ShellState {
         self.set_status(rc);
         let captured = if capture_stderr {
             output.stderr
+        } else if fd2_to_fd1 {
+            let mut merged = output.stdout;
+            merged.extend_from_slice(&output.stderr);
+            merged
         } else {
             output.stdout
         };
@@ -3555,14 +3691,6 @@ pub fn run_pipeline_subst_with_status(stages: &[(&str, &[&str])]) -> RuntimeResu
 /// Executes a pipeline and returns its stdout with trailing newlines stripped (`$(cmd1 | cmd2)`).
 pub fn run_pipeline_subst(stages: &[(&str, &[&str])]) -> RuntimeResult<String> {
     let out = run_pipeline(stages)?;
-    if !out.success {
-        let last_prog = stages.last().map(|(p, _)| *p).unwrap_or("<pipeline>");
-        return Err(RuntimeError::CommandFailed {
-            program: last_prog.to_owned(),
-            code: Some(out.exit_code),
-            stderr: out.stderr,
-        });
-    }
     Ok(trim_trailing_newlines(&out.stdout).to_owned())
 }
 
@@ -3804,6 +3932,21 @@ pub fn test_fd_terminal(fd_str: &str) -> bool {
     }
 }
 
+/// Equivalent to Bash `[[ -O path ]]`.
+pub fn test_owned_by_euid(path: &str) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: `geteuid` is always safe to call.
+        let euid = unsafe { libc::geteuid() };
+        fs::metadata(path).is_ok_and(|m| m.uid() == euid)
+    }
+    #[cfg(not(unix))]
+    {
+        Path::new(path).exists()
+    }
+}
+
 /// Equivalent to Bash `[[ text =~ pattern ]]`.
 pub fn test_regex_match(text: &str, pattern: &str) -> bool {
     regex::Regex::new(pattern).is_ok_and(|re| re.is_match(text))
@@ -4017,6 +4160,34 @@ impl<'a> ArithParser<'a> {
                     return chars[start..end].iter().collect();
                 }
                 return chars[start..].iter().collect();
+            }
+        }
+        if let Some(op_pos) = inner
+            .bytes()
+            .position(|b| !(b.is_ascii_alphanumeric() || b == b'_'))
+        {
+            let var_name = &inner[..op_pos];
+            let rest = &inner[op_pos..];
+            if !var_name.is_empty() {
+                if let Some((replace_all, after_slash)) = rest
+                    .strip_prefix("//")
+                    .map(|r| (true, r))
+                    .or_else(|| rest.strip_prefix('/').map(|r| (false, r)))
+                {
+                    let (pat, repl) = after_slash.split_once('/').unwrap_or((after_slash, ""));
+                    let val = self.read_var_str(var_name);
+                    return param_replace(&val, pat, repl, replace_all);
+                }
+                if let Some((pat, is_suffix, longest)) = rest
+                    .strip_prefix("##")
+                    .map(|p| (p, false, true))
+                    .or_else(|| rest.strip_prefix('#').map(|p| (p, false, false)))
+                    .or_else(|| rest.strip_prefix("%%").map(|p| (p, true, true)))
+                    .or_else(|| rest.strip_prefix('%').map(|p| (p, true, false)))
+                {
+                    let val = self.read_var_str(var_name);
+                    return param_trim(&val, pat, is_suffix, longest);
+                }
             }
         }
         self.read_var_str(inner)
@@ -4394,12 +4565,26 @@ impl<'a> ArithParser<'a> {
                 if idx_val < 0 {
                     return 0;
                 }
-                return self
+                let cur = self
                     .shell
                     .get_array_elem(&name, idx_val as usize)
                     .trim()
                     .parse::<i64>()
                     .unwrap_or(0);
+                if self.eat(b"++") {
+                    self.shell.set_array_elem(
+                        &name,
+                        idx_val as usize,
+                        cur.wrapping_add(1).to_string(),
+                    );
+                } else if self.eat(b"--") {
+                    self.shell.set_array_elem(
+                        &name,
+                        idx_val as usize,
+                        cur.wrapping_sub(1).to_string(),
+                    );
+                }
+                return cur;
             }
             let cur = self.read_var_i64(&name);
             if self.eat(b"++") {

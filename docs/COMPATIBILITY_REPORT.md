@@ -7,14 +7,14 @@
 
 ## Deterministic Mode
 
-- **Total tests:** 52
-- **Passed:** 52 (100.0%)
+- **Total tests:** 54
+- **Passed:** 54 (100.0%)
 - **Skipped:** 0
 - **Failed:** 0
 - **Compilation Failures:** 0
 - **Semantic Mismatches:** 0
 - **Timeouts:** 0
-- **Scripts with Unsupported Syntax:** 0
+- **Scripts with Unsupported Syntax:** 1
 
 | Category | Total | Passed | Failed | Pass Rate |
 | :--- | :---: | :---: | :---: | :---: |
@@ -25,9 +25,9 @@
 | Subshells (`14_subshell_var_isolation.sh`, `15_subshell_cwd_isolation.sh`, `16_subshell_exit_code.sh`) | 3 | 3 | 0 | 100.0% |
 | Pipelines (`17_pipeline_multistage.sh`, `18_pipeline_exit_code_default.sh`, `19_pipeline_negation.sh`) | 3 | 3 | 0 | 100.0% |
 | Command Substitution (`20_cmdsubst_trailing_newlines.sh`, `21_cmdsubst_nested_quoted.sh`, `22_cmdsubst_exit_status.sh`) | 3 | 3 | 0 | 100.0% |
-| Redirections & Stderr (`23_redir_truncate_append_input.sh`, `24_redir_stderr_separation.sh`, `25_redir_stderr_to_stdout.sh`, `36_heredoc_herestring_procsubst.sh`, `37_command_v_path_and_negation.sh`, `43_source_static_and_dynamic.sh`, `44_indirect_expansion.sh`, `46_nameref_declare_n.sh`, `48_arrays_mapfile_assoc.sh`, `49_printf_strftime_and_read.sh`, `52_proc_subst_and_redirects.sh`) | 11 | 11 | 0 | 100.0% |
+| Redirections & Stderr (`23_redir_truncate_append_input.sh`, `24_redir_stderr_separation.sh`, `25_redir_stderr_to_stdout.sh`, `36_heredoc_herestring_procsubst.sh`, `37_command_v_path_and_negation.sh`, `43_source_static_and_dynamic.sh`, `44_indirect_expansion.sh`, `46_nameref_declare_n.sh`, `48_arrays_mapfile_assoc.sh`, `49_printf_strftime_and_read.sh`, `52_proc_subst_and_redirects.sh`, `53_eval_and_dynamic_fn.sh`) | 12 | 12 | 0 | 100.0% |
 | Case & Parameter Expansion (`26_case_statement.sh`, `27_parameter_expansion.sh`, `40_nested_param_exp_and_compound_subst.sh`, `47_case_mod_and_param_exp.sh`) | 4 | 4 | 0 | 100.0% |
-| Arithmetic & C-Style Loops (`28_arithmetic_and_c_for.sh`, `38_dash_array_arith_pct.sh`, `51_brace_expansion_and_arith.sh`) | 3 | 3 | 0 | 100.0% |
+| Arithmetic & C-Style Loops (`28_arithmetic_and_c_for.sh`, `38_dash_array_arith_pct.sh`, `51_brace_expansion_and_arith.sh`, `54_neofetch_param_and_arith.sh`) | 4 | 4 | 0 | 100.0% |
 | Extended Tests (`29_extended_test_regex.sh`) | 1 | 1 | 0 | 100.0% |
 | Function Scoping (`30_function_scoping.sh`, `31_function_calls_and_return.sh`, `32_function_command_subst.sh`, `34_shift_and_fn_dispatch.sh`, `45_dynamic_fn_dispatch.sh`) | 5 | 5 | 0 | 100.0% |
 
@@ -100,6 +100,7 @@
 - `48_arrays_mapfile_assoc.sh` — **PASS** (unsupported: none)
 - `49_printf_strftime_and_read.sh` — **PASS** (unsupported: none)
 - `52_proc_subst_and_redirects.sh` — **PASS** (unsupported: none)
+- `53_eval_and_dynamic_fn.sh` — **PASS** (unsupported: eval: `eval "$dynamic_block"`)
 
 ### Case & Parameter Expansion
 
@@ -113,6 +114,7 @@
 - `28_arithmetic_and_c_for.sh` — **PASS** (unsupported: none)
 - `38_dash_array_arith_pct.sh` — **PASS** (unsupported: none)
 - `51_brace_expansion_and_arith.sh` — **PASS** (unsupported: none)
+- `54_neofetch_param_and_arith.sh` — **PASS** (unsupported: none)
 
 ### Extended Tests
 

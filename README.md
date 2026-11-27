@@ -70,7 +70,7 @@ cargo test --workspace
 | I/O, Pipelines & Subshells | Multi-stage pipelines, `>`, `>>`, `<`, `2>&1`, bare `>file`, `$(<file)`, heredocs (`<<`, `<<-`), `<<<`, `<(...)`, `<> <(...)`, `printf` (`-v`, `%(fmt)T`), `read` (`-t`, `-d`), subshell `( ... )` cwd isolation |
 | Signals, Tests & Diagnostics | `trap` (`EXIT`, `INT`, `TERM`, `ERR`, `trap - ...`), `[ ... ]`, `[[ ... ]]` with `=~` regex matching (`BASH_REMATCH`), `miette` source-span diagnostics |
 
-On the 52-script differential corpus (`tests/compatibility/`), deterministic mode achieves **52/52 (100.0%)** parity with GNU Bash 5.3 (**0** compile failures, **0** semantic mismatches, and **0** unsupported scripts; scripts with `# requires-bash: 4.0`/`4.2`/`4.3` are automatically gated when running on older host shells such as macOS Bash 3.2). See [docs/COMPATIBILITY_REPORT.md](docs/COMPATIBILITY_REPORT.md) for the full per-script breakdown.
+On the 54-script differential corpus (`tests/compatibility/`), deterministic mode achieves **54/54 (100.0%)** parity with GNU Bash 5.3 (**0** compile failures, **0** semantic mismatches, and **1** script with an `eval` unsupported construct; scripts with `# requires-bash: 4.0`/`4.2`/`4.3` are automatically gated when running on older host shells such as macOS Bash 3.2). See [docs/COMPATIBILITY_REPORT.md](docs/COMPATIBILITY_REPORT.md) for the full per-script breakdown.
 
 Any construct outside deterministic lowering emits `Stmt::Unsupported` and can optionally be translated via `--ai ollama|anthropic|openai` (`bash2rust-ai`). For a full-scale transpilation example, see [kerembsd/archinstall-tui-rs](https://github.com/kerembsd/archinstall-tui-rs).
 
@@ -78,7 +78,7 @@ Any construct outside deterministic lowering emits `Stmt::Unsupported` and can o
 
 - `crates/` — Compiler, runtime, verification, AI fallback, and CLI workspace crates
 - `tests/fixtures/` — Unit-level Bash fixtures for parser and codegen tests
-- `tests/compatibility/` — 52 differential compatibility scripts (`bash` vs. `bash2rust`)
+- `tests/compatibility/` — 54 differential compatibility scripts (`bash` vs. `bash2rust`)
 - `docs/` — Generated compatibility report (`docs/COMPATIBILITY_REPORT.md`)
 
 ## License

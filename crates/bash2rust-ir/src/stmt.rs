@@ -186,6 +186,7 @@ pub enum FileTestOp {
     CharDevice,
     Executable,
     FdIsTerminal,
+    OwnedByEffectiveUser,
 }
 
 /// Unary string predicate operator in `[ ... ]` / `test` / `[[ ... ]]`.

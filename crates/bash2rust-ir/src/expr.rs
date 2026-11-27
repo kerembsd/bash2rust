@@ -37,6 +37,23 @@ pub enum ParamExpansionOp {
     ArrayElement {
         index: Box<Word>,
     },
+    ArrayElemTrim {
+        index: Box<Word>,
+        pattern: Box<Word>,
+        is_suffix: bool,
+        longest: bool,
+    },
+    ArrayElemReplace {
+        index: Box<Word>,
+        pattern: Box<Word>,
+        replacement: Box<Word>,
+        replace_all: bool,
+    },
+    ArrayElemSubstring {
+        index: Box<Word>,
+        offset: Box<Word>,
+        length: Option<Box<Word>>,
+    },
     ArrayAll,
     ArrayAllIfSet,
     ArrayKeys,

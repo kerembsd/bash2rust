@@ -4,6 +4,15 @@ use std::path::{Path, PathBuf};
 use crate::{find_in_path_with, split_words, RuntimeResult, ShellState};
 
 impl ShellState {
+    /// Evaluates an in-memory Bash snippet (used for `eval "$var"`).
+    pub fn eval_bash_str(&mut self, src: &str) -> RuntimeResult<i32> {
+        let lines: Vec<String> = src.lines().map(str::to_owned).collect();
+        if let Some(rc) = self.exec_sourced_lines(&lines)? {
+            return Ok(self.set_status(rc));
+        }
+        Ok(self.last_status)
+    }
+
     /// Sources and executes a Bash file dynamically at runtime (`source` / `.`).
     pub fn source_file(&mut self, path: &str, args: &[&str]) -> RuntimeResult<i32> {
         let resolved = self.resolve_source_path(path);
@@ -110,6 +119,7 @@ impl ShellState {
                     body.push(lines[idx].clone());
                     idx += 1;
                 }
+                self.fn_overrides.remove(&fn_name);
                 self.sourced_functions.insert(fn_name, body);
                 self.set_status(0);
                 continue;
@@ -133,6 +143,31 @@ impl ShellState {
                     return Ok(Some(rc));
                 }
                 continue;
+            }
+
+            // Array assignment: `name=( ... )` (single-line or multi-line)
+            if let Some(eq_pos) = trimmed.find("=(") {
+                let lhs = trimmed[..eq_pos].trim();
+                let is_valid_name =
+                    !lhs.is_empty() && lhs.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+                if is_valid_name {
+                    let mut acc = trimmed[eq_pos + 2..].to_owned();
+                    let mut closed = acc.contains(')');
+                    while !closed && idx + 1 < lines.len() {
+                        idx += 1;
+                        acc.push(' ');
+                        acc.push_str(lines[idx].trim());
+                        if acc.contains(')') {
+                            closed = true;
+                        }
+                    }
+                    let inner = acc.split(')').next().unwrap_or("");
+                    let items = self.parse_sourced_tokens(inner);
+                    self.set_array(lhs, items);
+                    self.set_status(0);
+                    idx += 1;
+                    continue;
+                }
             }
 
             if let Some(rc) = self.exec_sourced_simple(trimmed)? {
@@ -315,6 +350,24 @@ impl ShellState {
                 }
             }
             _ => {
+                if let Some(dispatch) = self.fn_dispatcher {
+                    match dispatch(self, cmd, &args) {
+                        Ok(Some(rc)) => {
+                            self.set_status(rc);
+                            return Ok(None);
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            return match err.downcast::<super::RuntimeError>() {
+                                Ok(rt_err) => Err(*rt_err),
+                                Err(other) => Err(super::RuntimeError::Io {
+                                    program: cmd.to_owned(),
+                                    source: std::io::Error::other(other.to_string()),
+                                }),
+                            };
+                        }
+                    }
+                }
                 if let Some(res) = self.call_sourced_fn(cmd, &args) {
                     let rc = res?;
                     self.set_status(rc);

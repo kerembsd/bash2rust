@@ -285,7 +285,36 @@ fn try_expand_brace_range(inner: &str) -> Option<Vec<String>> {
 ///
 /// Single-quoted words `'...'` do not interpolate and return `Vec::new()`.
 fn parse_word_parts(raw: &str) -> (Vec<WordPart>, bool, Vec<bool>) {
-    if raw.len() >= 2
+    parse_word_parts_impl(raw, false, false)
+}
+
+fn parse_word_parts_in_context(
+    raw: &str,
+    in_double_quote: bool,
+) -> (Vec<WordPart>, bool, Vec<bool>) {
+    parse_word_parts_impl(raw, in_double_quote, false)
+}
+
+fn parse_param_pattern_parts(raw: &str, in_double_quote: bool) -> (Vec<WordPart>, bool, Vec<bool>) {
+    parse_word_parts_impl(raw, in_double_quote, true)
+}
+
+fn push_glob_escaped(dst: &mut String, s: &str) {
+    for ch in s.chars() {
+        if matches!(ch, '*' | '?' | '[' | ']') {
+            dst.push('\\');
+        }
+        dst.push(ch);
+    }
+}
+
+fn parse_word_parts_impl(
+    raw: &str,
+    in_double_quote: bool,
+    escape_quoted_glob: bool,
+) -> (Vec<WordPart>, bool, Vec<bool>) {
+    if !in_double_quote
+        && raw.len() >= 2
         && raw.starts_with('\'')
         && raw.ends_with('\'')
         && !raw[1..raw.len() - 1].contains('\'')
@@ -304,11 +333,15 @@ fn parse_word_parts(raw: &str) -> (Vec<WordPart>, bool, Vec<bool>) {
     let mut parts: Vec<WordPart> = Vec::new();
     let mut part_quoted: Vec<bool> = Vec::new();
     let mut literal_buf = String::new();
-    let mut literal_quoted = false;
-    let mut state = QuoteState::Unquoted;
+    let mut literal_quoted = in_double_quote;
+    let mut state = if in_double_quote {
+        QuoteState::DoubleQuoted
+    } else {
+        QuoteState::Unquoted
+    };
     let mut i = 0;
     let mut found_special = false;
-    let mut has_quotes = false;
+    let mut has_quotes = in_double_quote;
     let mut quote_segments = 0usize;
 
     while i < bytes.len() {
@@ -320,6 +353,10 @@ fn parse_word_parts(raw: &str) -> (Vec<WordPart>, bool, Vec<bool>) {
                     i += 1;
                 } else {
                     let ch = raw[i..].chars().next().expect("valid char");
+                    if escape_quoted_glob && matches!(ch, '*' | '?' | '[' | ']') {
+                        literal_buf.push('\\');
+                        found_special = true;
+                    }
                     literal_buf.push(ch);
                     literal_quoted = true;
                     i += ch.len_utf8();
@@ -343,6 +380,19 @@ fn parse_word_parts(raw: &str) -> (Vec<WordPart>, bool, Vec<bool>) {
                         literal_quoted = true;
                         i += 1 + ch.len_utf8();
                     }
+                } else if in_double_quote
+                    && b == b'$'
+                    && i + 1 < bytes.len()
+                    && bytes[i + 1] == b'\''
+                {
+                    found_special = true;
+                    if escape_quoted_glob {
+                        let mut decoded = String::new();
+                        i = decode_ansi_c_quoted(raw, bytes, i + 2, &mut decoded);
+                        push_glob_escaped(&mut literal_buf, &decoded);
+                    } else {
+                        i = decode_ansi_c_quoted(raw, bytes, i + 2, &mut literal_buf);
+                    }
                 } else if b == b'$' && i + 1 < bytes.len() {
                     if !literal_buf.is_empty() {
                         flush_literal(&mut literal_buf, &mut parts);
@@ -350,7 +400,7 @@ fn parse_word_parts(raw: &str) -> (Vec<WordPart>, bool, Vec<bool>) {
                         literal_quoted = false;
                     }
                     if let Some(next_idx) =
-                        try_parse_dollar(raw, bytes, i, &mut literal_buf, &mut parts)
+                        try_parse_dollar(raw, bytes, i, &mut literal_buf, &mut parts, true)
                     {
                         part_quoted.push(true);
                         found_special = true;
@@ -369,6 +419,10 @@ fn parse_word_parts(raw: &str) -> (Vec<WordPart>, bool, Vec<bool>) {
             }
             QuoteState::Unquoted => {
                 if b == b'\'' {
+                    if !literal_buf.is_empty() && !literal_quoted {
+                        flush_literal(&mut literal_buf, &mut parts);
+                        part_quoted.push(false);
+                    }
                     state = QuoteState::SingleQuoted;
                     has_quotes = true;
                     quote_segments += 1;
@@ -377,6 +431,10 @@ fn parse_word_parts(raw: &str) -> (Vec<WordPart>, bool, Vec<bool>) {
                     }
                     i += 1;
                 } else if b == b'"' {
+                    if !literal_buf.is_empty() && !literal_quoted {
+                        flush_literal(&mut literal_buf, &mut parts);
+                        part_quoted.push(false);
+                    }
                     state = QuoteState::DoubleQuoted;
                     has_quotes = true;
                     quote_segments += 1;
@@ -385,6 +443,10 @@ fn parse_word_parts(raw: &str) -> (Vec<WordPart>, bool, Vec<bool>) {
                     }
                     i += 1;
                 } else if b == b'\\' && i + 1 < bytes.len() {
+                    if !literal_buf.is_empty() && !literal_quoted {
+                        flush_literal(&mut literal_buf, &mut parts);
+                        part_quoted.push(false);
+                    }
                     let ch = raw[i + 1..].chars().next().expect("valid char");
                     literal_buf.push(ch);
                     literal_quoted = true;
@@ -392,11 +454,34 @@ fn parse_word_parts(raw: &str) -> (Vec<WordPart>, bool, Vec<bool>) {
                     found_special = true;
                     i += 1 + ch.len_utf8();
                 } else if b == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    if !literal_buf.is_empty() && !literal_quoted {
+                        flush_literal(&mut literal_buf, &mut parts);
+                        part_quoted.push(false);
+                    }
                     has_quotes = true;
                     found_special = true;
                     quote_segments += 1;
                     literal_quoted = true;
-                    i = decode_ansi_c_quoted(raw, bytes, i + 2, &mut literal_buf);
+                    if escape_quoted_glob {
+                        let mut decoded = String::new();
+                        i = decode_ansi_c_quoted(raw, bytes, i + 2, &mut decoded);
+                        push_glob_escaped(&mut literal_buf, &decoded);
+                    } else {
+                        i = decode_ansi_c_quoted(raw, bytes, i + 2, &mut literal_buf);
+                    }
+                } else if in_double_quote
+                    && b == b'$'
+                    && i + 1 < bytes.len()
+                    && bytes[i + 1] == b'\''
+                {
+                    found_special = true;
+                    if escape_quoted_glob {
+                        let mut decoded = String::new();
+                        i = decode_ansi_c_quoted(raw, bytes, i + 2, &mut decoded);
+                        push_glob_escaped(&mut literal_buf, &decoded);
+                    } else {
+                        i = decode_ansi_c_quoted(raw, bytes, i + 2, &mut literal_buf);
+                    }
                 } else if b == b'$' && i + 1 < bytes.len() {
                     if !literal_buf.is_empty() {
                         flush_literal(&mut literal_buf, &mut parts);
@@ -404,16 +489,26 @@ fn parse_word_parts(raw: &str) -> (Vec<WordPart>, bool, Vec<bool>) {
                         literal_quoted = false;
                     }
                     if let Some(next_idx) =
-                        try_parse_dollar(raw, bytes, i, &mut literal_buf, &mut parts)
+                        try_parse_dollar(raw, bytes, i, &mut literal_buf, &mut parts, false)
                     {
                         part_quoted.push(false);
                         found_special = true;
                         i = next_idx;
                     } else {
+                        if !literal_buf.is_empty() && literal_quoted {
+                            flush_literal(&mut literal_buf, &mut parts);
+                            part_quoted.push(true);
+                            literal_quoted = false;
+                        }
                         literal_buf.push('$');
                         i += 1;
                     }
                 } else {
+                    if !literal_buf.is_empty() && literal_quoted {
+                        flush_literal(&mut literal_buf, &mut parts);
+                        part_quoted.push(true);
+                        literal_quoted = false;
+                    }
                     let ch = raw[i..].chars().next().expect("valid char");
                     literal_buf.push(ch);
                     if quote_segments > 0 {
@@ -457,18 +552,47 @@ fn split_replace_parts(s: &str) -> (String, String) {
 }
 
 fn unescape_param_pattern(s: &str) -> String {
-    if s.starts_with("$'") {
-        return s.to_owned();
-    }
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(next) = chars.next() {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+            out.push_str("$'");
+            i += 2;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if b == b'\\' && i + 1 < bytes.len() {
+                    let ch = s[i + 1..].chars().next().expect("valid char");
+                    out.push('\\');
+                    out.push(ch);
+                    i += 1 + ch.len_utf8();
+                    continue;
+                }
+                let ch = s[i..].chars().next().expect("valid char");
+                out.push(ch);
+                i += ch.len_utf8();
+                if b == b'\'' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            let next = s[i + 1..].chars().next().expect("valid char");
+            if matches!(
+                next,
+                '#' | '%' | '/' | '*' | '?' | '[' | ']' | '\\' | '\'' | '"' | '{' | '}' | ';'
+            ) {
+                out.push(next);
+            } else {
+                out.push('\\');
                 out.push(next);
             }
+            i += 1 + next.len_utf8();
         } else {
-            out.push(c);
+            let ch = s[i..].chars().next().expect("valid char");
+            out.push(ch);
+            i += ch.len_utf8();
         }
     }
     out
@@ -600,6 +724,7 @@ fn try_parse_dollar(
     i: usize,
     literal_buf: &mut String,
     parts: &mut Vec<WordPart>,
+    in_double_quote: bool,
 ) -> Option<usize> {
     let next = bytes[i + 1];
 
@@ -721,8 +846,8 @@ fn try_parse_dollar(
                     let (replace_all, rest_s) = after_slash;
                     let (pat_raw, repl_raw) = split_replace_parts(rest_s);
                     let pat_clean = unescape_param_pattern(&pat_raw);
-                    let (pp, phq, ppq) = parse_word_parts(&pat_clean);
-                    let (rp, rhq, rpq) = parse_word_parts(&repl_raw);
+                    let (pp, phq, ppq) = parse_param_pattern_parts(&pat_clean, in_double_quote);
+                    let (rp, rhq, rpq) = parse_word_parts_in_context(&repl_raw, in_double_quote);
                     flush_literal(literal_buf, parts);
                     parts.push(WordPart::ParamExpansion {
                         name: arr_name.to_owned(),
@@ -756,7 +881,7 @@ fn try_parse_dollar(
                         Some((o, l)) => (o.trim(), Some(l.trim())),
                         None => (slice_spec.trim(), None),
                     };
-                    let (op, ohq, opq) = parse_word_parts(off_s);
+                    let (op, ohq, opq) = parse_word_parts_in_context(off_s, in_double_quote);
                     let offset = Box::new(Word {
                         raw: off_s.to_owned(),
                         span: None,
@@ -765,7 +890,7 @@ fn try_parse_dollar(
                         part_quoted: opq,
                     });
                     let length = len_opt_s.map(|ls| {
-                        let (lp, lhq, lpq) = parse_word_parts(ls);
+                        let (lp, lhq, lpq) = parse_word_parts_in_context(ls, in_double_quote);
                         Box::new(Word {
                             raw: ls.to_owned(),
                             span: None,
@@ -783,8 +908,8 @@ fn try_parse_dollar(
                 }
             }
             if let Some(br_open) = inner.find('[') {
-                if let Some(br_close) = inner.find(']') {
-                    if br_close == inner.len() - 1 && br_open < br_close {
+                if let Some(br_close) = find_matching_bracket(inner.as_bytes(), br_open + 1) {
+                    if br_open < br_close {
                         let name = &inner[..br_open];
                         let idx_src = inner[br_open + 1..br_close].trim();
                         if is_simple_var_ref(name)
@@ -793,30 +918,140 @@ fn try_parse_dollar(
                             && idx_src != "*"
                         {
                             let (idx_parts, idx_has_quotes, idx_part_quoted) =
-                                parse_word_parts(idx_src);
-                            let index = Word {
+                                parse_word_parts_in_context(idx_src, in_double_quote);
+                            let index = Box::new(Word {
                                 raw: idx_src.to_owned(),
                                 span: None,
                                 parts: idx_parts,
                                 has_quotes: idx_has_quotes,
                                 part_quoted: idx_part_quoted,
-                            };
-                            flush_literal(literal_buf, parts);
-                            parts.push(WordPart::ParamExpansion {
-                                name: name.to_owned(),
-                                op: ParamExpansionOp::ArrayElement {
-                                    index: Box::new(index),
-                                },
                             });
-                            return Some(close_idx + 1);
+                            let rest = &inner[br_close + 1..];
+                            if rest.is_empty() {
+                                flush_literal(literal_buf, parts);
+                                parts.push(WordPart::ParamExpansion {
+                                    name: name.to_owned(),
+                                    op: ParamExpansionOp::ArrayElement { index },
+                                });
+                                return Some(close_idx + 1);
+                            }
+                            if let Some((pat_str, is_suffix, longest)) = rest
+                                .strip_prefix("##")
+                                .map(|p| (p, false, true))
+                                .or_else(|| rest.strip_prefix('#').map(|p| (p, false, false)))
+                                .or_else(|| rest.strip_prefix("%%").map(|p| (p, true, true)))
+                                .or_else(|| rest.strip_prefix('%').map(|p| (p, true, false)))
+                            {
+                                let (pp, phq, ppq) =
+                                    parse_word_parts_in_context(pat_str, in_double_quote);
+                                let pattern = Box::new(Word {
+                                    raw: pat_str.to_owned(),
+                                    span: None,
+                                    parts: pp,
+                                    has_quotes: phq,
+                                    part_quoted: ppq,
+                                });
+                                flush_literal(literal_buf, parts);
+                                parts.push(WordPart::ParamExpansion {
+                                    name: name.to_owned(),
+                                    op: ParamExpansionOp::ArrayElemTrim {
+                                        index,
+                                        pattern,
+                                        is_suffix,
+                                        longest,
+                                    },
+                                });
+                                return Some(close_idx + 1);
+                            }
+                            if let Some((replace_all, after_slash)) = rest
+                                .strip_prefix("//")
+                                .map(|r| (true, r))
+                                .or_else(|| rest.strip_prefix('/').map(|r| (false, r)))
+                            {
+                                let (pat_raw, repl_raw) = split_replace_parts(after_slash);
+                                let pat_clean = unescape_param_pattern(&pat_raw);
+                                let (pp, phq, ppq) =
+                                    parse_param_pattern_parts(&pat_clean, in_double_quote);
+                                let (rp, rhq, rpq) =
+                                    parse_word_parts_in_context(&repl_raw, in_double_quote);
+                                flush_literal(literal_buf, parts);
+                                parts.push(WordPart::ParamExpansion {
+                                    name: name.to_owned(),
+                                    op: ParamExpansionOp::ArrayElemReplace {
+                                        index,
+                                        pattern: Box::new(Word {
+                                            raw: pat_clean,
+                                            span: None,
+                                            parts: pp,
+                                            has_quotes: phq,
+                                            part_quoted: ppq,
+                                        }),
+                                        replacement: Box::new(Word {
+                                            raw: repl_raw,
+                                            span: None,
+                                            parts: rp,
+                                            has_quotes: rhq,
+                                            part_quoted: rpq,
+                                        }),
+                                        replace_all,
+                                    },
+                                });
+                                return Some(close_idx + 1);
+                            }
+                            if let Some(slice_spec) = rest
+                                .strip_prefix(':')
+                                .filter(|s| !s.starts_with(['+', '-', '=', '?']))
+                            {
+                                let (off_s, len_opt_s) = match slice_spec.split_once(':') {
+                                    Some((o, l)) => (o.trim(), Some(l.trim())),
+                                    None => (slice_spec.trim(), None),
+                                };
+                                let (op, ohq, opq) =
+                                    parse_word_parts_in_context(off_s, in_double_quote);
+                                let offset = Box::new(Word {
+                                    raw: off_s.to_owned(),
+                                    span: None,
+                                    parts: op,
+                                    has_quotes: ohq,
+                                    part_quoted: opq,
+                                });
+                                let length = len_opt_s.map(|ls| {
+                                    let (lp, lhq, lpq) =
+                                        parse_word_parts_in_context(ls, in_double_quote);
+                                    Box::new(Word {
+                                        raw: ls.to_owned(),
+                                        span: None,
+                                        parts: lp,
+                                        has_quotes: lhq,
+                                        part_quoted: lpq,
+                                    })
+                                });
+                                flush_literal(literal_buf, parts);
+                                parts.push(WordPart::ParamExpansion {
+                                    name: name.to_owned(),
+                                    op: ParamExpansionOp::ArrayElemSubstring {
+                                        index,
+                                        offset,
+                                        length,
+                                    },
+                                });
+                                return Some(close_idx + 1);
+                            }
                         }
                     }
                 }
             }
-            if let Some(op_pos) = inner
-                .bytes()
-                .position(|b| !(b.is_ascii_alphanumeric() || b == b'_'))
+            let op_pos_opt = if inner.len() > 1
+                && matches!(inner.as_bytes()[0], b'*' | b'@' | b'?' | b'#')
+                && inner.as_bytes()[1] != b'['
             {
+                Some(1usize)
+            } else {
+                inner
+                    .bytes()
+                    .position(|b| !(b.is_ascii_alphanumeric() || b == b'_'))
+            };
+            if let Some(op_pos) = op_pos_opt {
                 let name = &inner[..op_pos];
                 let rest = &inner[op_pos..];
                 if is_simple_var_ref(name) {
@@ -825,7 +1060,7 @@ fn try_parse_dollar(
                     {
                         let colon = rest.starts_with(":-");
                         let (def_parts, def_has_quotes, def_part_quoted) =
-                            parse_word_parts(def_str);
+                            parse_word_parts_in_context(def_str, in_double_quote);
                         let default = Word {
                             raw: def_str.to_owned(),
                             span: None,
@@ -845,7 +1080,7 @@ fn try_parse_dollar(
                     {
                         let colon = rest.starts_with(":=");
                         let (def_parts, def_has_quotes, def_part_quoted) =
-                            parse_word_parts(def_str);
+                            parse_word_parts_in_context(def_str, in_double_quote);
                         let default = Word {
                             raw: def_str.to_owned(),
                             span: None,
@@ -865,7 +1100,7 @@ fn try_parse_dollar(
                     {
                         let colon = rest.starts_with(":+");
                         let (alt_parts, alt_has_quotes, alt_part_quoted) =
-                            parse_word_parts(alt_str);
+                            parse_word_parts_in_context(alt_str, in_double_quote);
                         let alt = Word {
                             raw: alt_str.to_owned(),
                             span: None,
@@ -887,7 +1122,7 @@ fn try_parse_dollar(
                         .or_else(|| rest.strip_prefix("%%").map(|p| (p, true, true)))
                         .or_else(|| rest.strip_prefix('%').map(|p| (p, true, false)))
                     {
-                        let (pp, phq, ppq) = parse_word_parts(pat_str);
+                        let (pp, phq, ppq) = parse_word_parts_in_context(pat_str, in_double_quote);
                         let pattern = Box::new(Word {
                             raw: pat_str.to_owned(),
                             span: None,
@@ -913,8 +1148,9 @@ fn try_parse_dollar(
                     {
                         let (pat_raw, repl_raw) = split_replace_parts(after_slash);
                         let pat_clean = unescape_param_pattern(&pat_raw);
-                        let (pp, phq, ppq) = parse_word_parts(&pat_clean);
-                        let (rp, rhq, rpq) = parse_word_parts(&repl_raw);
+                        let (pp, phq, ppq) = parse_param_pattern_parts(&pat_clean, in_double_quote);
+                        let (rp, rhq, rpq) =
+                            parse_word_parts_in_context(&repl_raw, in_double_quote);
                         flush_literal(literal_buf, parts);
                         parts.push(WordPart::ParamExpansion {
                             name: name.to_owned(),
@@ -965,7 +1201,8 @@ fn try_parse_dollar(
                         let pattern = if pat_s.is_empty() {
                             None
                         } else {
-                            let (pp, phq, ppq) = parse_word_parts(pat_s);
+                            let (pp, phq, ppq) =
+                                parse_word_parts_in_context(pat_s, in_double_quote);
                             Some(Box::new(Word {
                                 raw: pat_s.to_owned(),
                                 span: None,
@@ -989,7 +1226,7 @@ fn try_parse_dollar(
                             Some((o, l)) => (o.trim(), Some(l.trim())),
                             None => (slice_spec.trim(), None),
                         };
-                        let (op, ohq, opq) = parse_word_parts(off_s);
+                        let (op, ohq, opq) = parse_word_parts_in_context(off_s, in_double_quote);
                         let offset = Box::new(Word {
                             raw: off_s.to_owned(),
                             span: None,
@@ -998,7 +1235,7 @@ fn try_parse_dollar(
                             part_quoted: opq,
                         });
                         let length = len_opt_s.map(|ls| {
-                            let (lp, lhq, lpq) = parse_word_parts(ls);
+                            let (lp, lhq, lpq) = parse_word_parts_in_context(ls, in_double_quote);
                             Box::new(Word {
                                 raw: ls.to_owned(),
                                 span: None,
@@ -1060,6 +1297,32 @@ fn find_matching_double_paren(bytes: &[u8], start: usize) -> Option<usize> {
             }
             _ => idx += 1,
         }
+    }
+    None
+}
+
+fn find_matching_bracket(bytes: &[u8], mut i: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            if let Some(end) = find_matching_brace(bytes, i + 2) {
+                i = end + 1;
+                continue;
+            }
+        }
+        if bytes[i] == b'[' {
+            depth += 1;
+        } else if bytes[i] == b']' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i += 1;
     }
     None
 }

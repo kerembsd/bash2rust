@@ -107,6 +107,8 @@ impl Scope {
 
 struct CodegenCtx {
     functions: HashMap<String, syn::Ident>,
+    redefined_functions: HashSet<String>,
+    fn_def_idents: HashMap<(String, Option<bash2rust_ir::SourceSpan>), syn::Ident>,
     all_functions: Vec<(syn::Ident, FunctionDef)>,
     source_name: String,
 }
@@ -115,6 +117,8 @@ impl CodegenCtx {
     fn empty() -> Self {
         Self {
             functions: HashMap::new(),
+            redefined_functions: HashSet::new(),
+            fn_def_idents: HashMap::new(),
             all_functions: Vec::new(),
             source_name: String::from("<inline>"),
         }
@@ -122,16 +126,22 @@ impl CodegenCtx {
 
     fn from_program(program: &IrProgram) -> Self {
         let mut functions = HashMap::new();
+        let mut redefined_functions = HashSet::new();
+        let mut fn_def_idents = HashMap::new();
         let mut all_functions = Vec::new();
         let mut used = HashSet::new();
         collect_functions_in_stmts(
             &program.statements,
             &mut functions,
+            &mut redefined_functions,
+            &mut fn_def_idents,
             &mut all_functions,
             &mut used,
         );
         Self {
             functions,
+            redefined_functions,
+            fn_def_idents,
             all_functions,
             source_name: program.source.clone(),
         }
@@ -141,17 +151,28 @@ impl CodegenCtx {
 fn collect_functions_in_stmts(
     stmts: &[Stmt],
     functions: &mut HashMap<String, syn::Ident>,
+    redefined_functions: &mut HashSet<String>,
+    fn_def_idents: &mut HashMap<(String, Option<bash2rust_ir::SourceSpan>), syn::Ident>,
     all_functions: &mut Vec<(syn::Ident, FunctionDef)>,
     used: &mut HashSet<String>,
 ) {
     for stmt in stmts {
-        collect_functions_in_stmt(stmt, functions, all_functions, used);
+        collect_functions_in_stmt(
+            stmt,
+            functions,
+            redefined_functions,
+            fn_def_idents,
+            all_functions,
+            used,
+        );
     }
 }
 
 fn collect_functions_in_stmt(
     stmt: &Stmt,
     functions: &mut HashMap<String, syn::Ident>,
+    redefined_functions: &mut HashSet<String>,
+    fn_def_idents: &mut HashMap<(String, Option<bash2rust_ir::SourceSpan>), syn::Ident>,
     all_functions: &mut Vec<(syn::Ident, FunctionDef)>,
     used: &mut HashSet<String>,
 ) {
@@ -166,50 +187,167 @@ fn collect_functions_in_stmt(
             }
             used.insert(candidate.clone());
             let ident = safe_ident(&candidate);
-            functions.insert(func.name.clone(), ident.clone());
+            if functions.contains_key(&func.name) {
+                redefined_functions.insert(func.name.clone());
+            } else {
+                functions.insert(func.name.clone(), ident.clone());
+            }
+            fn_def_idents.insert((func.name.clone(), func.span), ident.clone());
             all_functions.push((ident, func.clone()));
-            collect_functions_in_stmts(&func.body.statements, functions, all_functions, used);
+            collect_functions_in_stmts(
+                &func.body.statements,
+                functions,
+                redefined_functions,
+                fn_def_idents,
+                all_functions,
+                used,
+            );
         }
         Stmt::If(i) => {
-            collect_functions_in_stmts(&i.condition.statements, functions, all_functions, used);
-            collect_functions_in_stmts(&i.then_branch.statements, functions, all_functions, used);
+            collect_functions_in_stmts(
+                &i.condition.statements,
+                functions,
+                redefined_functions,
+                fn_def_idents,
+                all_functions,
+                used,
+            );
+            collect_functions_in_stmts(
+                &i.then_branch.statements,
+                functions,
+                redefined_functions,
+                fn_def_idents,
+                all_functions,
+                used,
+            );
             for b in &i.elif_branches {
-                collect_functions_in_stmts(&b.condition.statements, functions, all_functions, used);
-                collect_functions_in_stmts(&b.body.statements, functions, all_functions, used);
+                collect_functions_in_stmts(
+                    &b.condition.statements,
+                    functions,
+                    redefined_functions,
+                    fn_def_idents,
+                    all_functions,
+                    used,
+                );
+                collect_functions_in_stmts(
+                    &b.body.statements,
+                    functions,
+                    redefined_functions,
+                    fn_def_idents,
+                    all_functions,
+                    used,
+                );
             }
             if let Some(e) = &i.else_branch {
-                collect_functions_in_stmts(&e.statements, functions, all_functions, used);
+                collect_functions_in_stmts(
+                    &e.statements,
+                    functions,
+                    redefined_functions,
+                    fn_def_idents,
+                    all_functions,
+                    used,
+                );
             }
         }
         Stmt::Case(c) => {
             for item in &c.items {
-                collect_functions_in_stmts(&item.body.statements, functions, all_functions, used);
+                collect_functions_in_stmts(
+                    &item.body.statements,
+                    functions,
+                    redefined_functions,
+                    fn_def_idents,
+                    all_functions,
+                    used,
+                );
             }
         }
         Stmt::For(f) => {
-            collect_functions_in_stmts(&f.body.statements, functions, all_functions, used);
+            collect_functions_in_stmts(
+                &f.body.statements,
+                functions,
+                redefined_functions,
+                fn_def_idents,
+                all_functions,
+                used,
+            );
         }
         Stmt::ArithFor(f) => {
-            collect_functions_in_stmts(&f.body.statements, functions, all_functions, used);
+            collect_functions_in_stmts(
+                &f.body.statements,
+                functions,
+                redefined_functions,
+                fn_def_idents,
+                all_functions,
+                used,
+            );
         }
         Stmt::Loop(l) => {
-            collect_functions_in_stmts(&l.condition.statements, functions, all_functions, used);
-            collect_functions_in_stmts(&l.body.statements, functions, all_functions, used);
+            collect_functions_in_stmts(
+                &l.condition.statements,
+                functions,
+                redefined_functions,
+                fn_def_idents,
+                all_functions,
+                used,
+            );
+            collect_functions_in_stmts(
+                &l.body.statements,
+                functions,
+                redefined_functions,
+                fn_def_idents,
+                all_functions,
+                used,
+            );
         }
         Stmt::Block(b) => {
-            collect_functions_in_stmts(&b.statements, functions, all_functions, used);
+            collect_functions_in_stmts(
+                &b.statements,
+                functions,
+                redefined_functions,
+                fn_def_idents,
+                all_functions,
+                used,
+            );
         }
         Stmt::Source { body: Some(b), .. } => {
-            collect_functions_in_stmts(&b.statements, functions, all_functions, used);
+            collect_functions_in_stmts(
+                &b.statements,
+                functions,
+                redefined_functions,
+                fn_def_idents,
+                all_functions,
+                used,
+            );
         }
         Stmt::AndOr(ao) => {
-            collect_functions_in_stmt(&ao.first, functions, all_functions, used);
+            collect_functions_in_stmt(
+                &ao.first,
+                functions,
+                redefined_functions,
+                fn_def_idents,
+                all_functions,
+                used,
+            );
             for r in &ao.rest {
-                collect_functions_in_stmt(&r.rhs, functions, all_functions, used);
+                collect_functions_in_stmt(
+                    &r.rhs,
+                    functions,
+                    redefined_functions,
+                    fn_def_idents,
+                    all_functions,
+                    used,
+                );
             }
         }
         Stmt::Pipeline(p) => {
-            collect_functions_in_stmts(&p.commands, functions, all_functions, used);
+            collect_functions_in_stmts(
+                &p.commands,
+                functions,
+                redefined_functions,
+                fn_def_idents,
+                all_functions,
+                used,
+            );
         }
         _ => {}
     }
@@ -351,18 +489,29 @@ pub fn emit_program_tokens(program: &IrProgram) -> Result<TokenStream, CodegenEr
         }
     }
 
-    let dynamic_arms: Vec<TokenStream> = ctx
-        .functions
-        .iter()
-        .map(|(bash_name, fn_ident)| {
-            quote! {
+    let mut dynamic_arms: Vec<TokenStream> = Vec::new();
+    let mut seen_arm_names: HashSet<String> = HashSet::new();
+    for (bash_name, fn_ident) in &ctx.functions {
+        if seen_arm_names.insert(bash_name.clone()) {
+            dynamic_arms.push(quote! {
                 #bash_name => {
                     #fn_ident(__shell, args)?;
-                    Ok(Some(__shell.last_status))
+                    return Ok(Some(__shell.last_status));
                 }
-            }
-        })
-        .collect();
+            });
+        }
+    }
+    for (fn_ident, _) in &ctx.all_functions {
+        let impl_key = fn_ident.to_string();
+        if seen_arm_names.insert(impl_key.clone()) {
+            dynamic_arms.push(quote! {
+                #impl_key => {
+                    #fn_ident(__shell, args)?;
+                    return Ok(Some(__shell.last_status));
+                }
+            });
+        }
+    }
 
     let fn_names: Vec<&String> = ctx.functions.keys().collect();
     Ok(quote! {
@@ -374,15 +523,18 @@ pub fn emit_program_tokens(program: &IrProgram) -> Result<TokenStream, CodegenEr
             prog: &str,
             args: &[&str],
         ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
+            if let Some(__ov) = __shell.get_fn_override(prog).map(str::to_owned) {
+                match __ov.as_str() {
+                    #(#dynamic_arms)*
+                    _ => {}
+                }
+            }
+            if let Some(__res) = __shell.call_sourced_fn(prog, args) {
+                return Ok(Some(__res?));
+            }
             match prog {
                 #(#dynamic_arms)*
-                _ => {
-                    if let Some(__res) = __shell.call_sourced_fn(prog, args) {
-                        Ok(Some(__res?))
-                    } else {
-                        Ok(None)
-                    }
-                }
+                _ => Ok(None),
             }
         }
 
@@ -454,7 +606,18 @@ fn emit_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStream {
         Stmt::ArithFor(arith_for) => emit_arith_for_stmt_with(ctx, scope, arith_for),
         Stmt::Arith(arith) => emit_arith_stmt(scope, arith),
         Stmt::Loop(loop_stmt) => emit_loop_stmt_with(ctx, scope, loop_stmt),
-        Stmt::Function(_) => quote! {},
+        Stmt::Function(func) => {
+            if ctx.redefined_functions.contains(&func.name) {
+                if let Some(ident) = ctx.fn_def_idents.get(&(func.name.clone(), func.span)) {
+                    let bash_name = &func.name;
+                    let impl_name = ident.to_string();
+                    return quote! {
+                        __shell.set_fn_override(#bash_name, #impl_name);
+                    };
+                }
+            }
+            quote! {}
+        }
         Stmt::Return { code, .. } => emit_return_stmt(scope, code.as_ref()),
         Stmt::Source {
             path, args, body, ..
@@ -673,6 +836,41 @@ fn emit_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStream {
         Stmt::AndOr(and_or) => emit_and_or_stmt(ctx, scope, and_or),
         Stmt::Pipeline(pipeline) => emit_pipeline_stmt(ctx, scope, pipeline),
         Stmt::Unsupported { construct, raw, .. } => {
+            if construct == "eval" {
+                let arg = raw.strip_prefix("eval").unwrap_or("").trim();
+                let unq = arg
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .unwrap_or(arg);
+                if let Some(var_name) = unq
+                    .strip_prefix("${")
+                    .and_then(|s| s.strip_suffix('}'))
+                    .or_else(|| unq.strip_prefix('$'))
+                {
+                    if let Some(binding) = scope.get(var_name) {
+                        let ident = &binding.ident;
+                        return quote! {
+                            {
+                                let __eval_src = if !#ident.is_empty() {
+                                    #ident.clone()
+                                } else {
+                                    __shell.get_var(#var_name).unwrap_or("").to_owned()
+                                };
+                                let _ = __shell.eval_bash_str(&__eval_src)?;
+                            }
+                        };
+                    }
+                    return quote! {
+                        {
+                            let __eval_src = __shell.get_var(#var_name).unwrap_or("").to_owned();
+                            let _ = __shell.eval_bash_str(&__eval_src)?;
+                        }
+                    };
+                }
+                return quote! {
+                    let _ = __shell.eval_bash_str(#unq)?;
+                };
+            }
             quote! {
                 let _ = (#construct, #raw);
             }
@@ -954,6 +1152,14 @@ fn emit_assignment_with_inner(scope: &mut Scope, assign: &Assignment) -> TokenSt
             };
 
             if assign.append {
+                let was_str_slice = scope.get(name).is_some_and(|b| b.ty == VarType::StrSlice);
+                let init_owned = if already_owned {
+                    quote! {}
+                } else if was_str_slice {
+                    quote! { let mut #ident = #ident.to_owned(); }
+                } else {
+                    quote! { let mut #ident = String::new(); }
+                };
                 match &assign.value {
                     AssignValue::Scalar(word) => {
                         let s_expr = if word.parts.is_empty() {
@@ -961,10 +1167,14 @@ fn emit_assignment_with_inner(scope: &mut Scope, assign: &Assignment) -> TokenSt
                             quote! { #unquoted }
                         } else {
                             let se = emit_word_string_expr(scope, word);
-                            quote! { &(#se) }
+                            quote! { #se }
                         };
                         quote! {
-                            #ident.push_str(#s_expr);
+                            #init_owned
+                            {
+                                let __append_val = #s_expr;
+                                #ident.push_str(&__append_val);
+                            }
                             #shell_sync
                             #ifs_update
                         }
@@ -975,6 +1185,7 @@ fn emit_assignment_with_inner(scope: &mut Scope, assign: &Assignment) -> TokenSt
                             .map(|item| emit_word_string_expr(scope, &item.value))
                             .collect();
                         quote! {
+                            #init_owned
                             #ident.extend([#(#elems),*]);
                             #shell_sync
                         }
@@ -1413,7 +1624,12 @@ pub fn emit_for_stmt(for_stmt: &ForStmt) -> TokenStream {
 
 fn emit_for_stmt_with(ctx: &CodegenCtx, scope: &mut Scope, for_stmt: &ForStmt) -> TokenStream {
     let mut body_scope = scope.clone();
-    let var_ty = if for_stmt.values.is_some() {
+    let mut body_assigns = Vec::new();
+    collect_block_assigns(&for_stmt.body, &mut body_assigns);
+    let var_mutated_in_body = body_assigns
+        .iter()
+        .any(|(n, is_arr)| !is_arr && n == &for_stmt.variable);
+    let var_ty = if for_stmt.values.is_some() && !var_mutated_in_body {
         VarType::StrSlice
     } else {
         VarType::OwnedString
@@ -1421,13 +1637,24 @@ fn emit_for_stmt_with(ctx: &CodegenCtx, scope: &mut Scope, for_stmt: &ForStmt) -
     let var_ident = body_scope.declare(&for_stmt.variable, var_ty);
     let body = emit_block_with(ctx, &mut body_scope, &for_stmt.body);
 
+    let (iter_ident, own_binding) = if for_stmt.values.is_some() && var_mutated_in_body {
+        let raw_ident = format_ident!("__for_item_{}", var_ident);
+        (
+            raw_ident.clone(),
+            quote! { let mut #var_ident = String::from(#raw_ident); },
+        )
+    } else {
+        (var_ident.clone(), quote! {})
+    };
+
     match &for_stmt.values {
         Some(words) if words.iter().any(word_needs_expansion) => {
             let expand_stmts = emit_expanded_word_vec(scope, words, quote! { __items });
             quote! {
                 {
                     #expand_stmts
-                    for #var_ident in __items.iter().map(String::as_str) {
+                    for #iter_ident in __items.iter().map(String::as_str) {
+                        #own_binding
                         #body
                     }
                 }
@@ -1437,7 +1664,8 @@ fn emit_for_stmt_with(ctx: &CodegenCtx, scope: &mut Scope, for_stmt: &ForStmt) -
             let items: Vec<TokenStream> =
                 words.iter().map(|w| emit_word_str_expr(scope, w)).collect();
             quote! {
-                for #var_ident in [#(#items),*] {
+                for #iter_ident in [#(#items),*] {
+                    #own_binding
                     #body
                 }
             }
@@ -1635,6 +1863,9 @@ fn emit_test_expr_with(scope: &Scope, expr: &TestExpr) -> TokenStream {
                 FileTestOp::FdIsTerminal => {
                     quote! { bash2rust_runtime::test_fd_terminal(#path_expr) }
                 }
+                FileTestOp::OwnedByEffectiveUser => {
+                    quote! { bash2rust_runtime::test_owned_by_euid(#path_expr) }
+                }
             }
         }
         TestExpr::Unary { op, operand } => {
@@ -1672,7 +1903,8 @@ fn emit_test_expr_with(scope: &Scope, expr: &TestExpr) -> TokenStream {
                     quote! { __shell.test_regex_match(#lhs_expr, #rhs_expr) }
                 }
                 BinaryTestOp::PatternMatch => {
-                    quote! { bash2rust_runtime::pattern_match(#rhs_expr, #lhs_expr) }
+                    let pat_expr = emit_word_pattern_expr(scope, rhs);
+                    quote! { bash2rust_runtime::pattern_match(#pat_expr, #lhs_expr) }
                 }
             }
         }
@@ -1751,18 +1983,37 @@ fn emit_command_call(ctx: &CodegenCtx, scope: &mut Scope, cmd: &CommandCall) -> 
         };
     }
 
-    // Shell `unset` builtin (e.g. `unset IFS` or `unset var`).
+    // Shell `unset` builtin (e.g. `unset IFS`, `unset -v prin`, or `unset var`).
     if name_word.raw == "unset" && cmd.redirects.is_empty() {
         let mut unset_stmts = Vec::new();
         for arg in &cmd.args {
             let var_name = unquote_bash_word(&arg.raw);
+            if var_name.starts_with('-') {
+                continue;
+            }
             if var_name == "IFS" {
                 unset_stmts.push(quote! { __shell.ifs = None; });
             } else if let Some(binding) = scope.get(&var_name) {
-                if binding.ty == VarType::OwnedString {
-                    let ident = binding.ident.clone();
-                    unset_stmts.push(quote! { #ident.clear(); });
+                let ident = binding.ident.clone();
+                match binding.ty {
+                    VarType::OwnedString => {
+                        unset_stmts.push(quote! {
+                            #ident.clear();
+                            __shell.unset_var(#var_name);
+                        });
+                    }
+                    VarType::OwnedArray => {
+                        unset_stmts.push(quote! {
+                            #ident.clear();
+                            __shell.unset_var(#var_name);
+                        });
+                    }
+                    VarType::StrSlice => {
+                        unset_stmts.push(quote! { __shell.unset_var(#var_name); });
+                    }
                 }
+            } else {
+                unset_stmts.push(quote! { __shell.unset_var(#var_name); });
             }
         }
         return quote! { #(#unset_stmts)* };
@@ -1836,7 +2087,7 @@ fn emit_command_call(ctx: &CodegenCtx, scope: &mut Scope, cmd: &CommandCall) -> 
     };
 
     // Direct call to a hoisted Bash function if defined in this script (including redirects).
-    if !bypass_fns {
+    if !bypass_fns && !ctx.redefined_functions.contains(&effective_name.raw) {
         if let Some(fn_ident) = ctx.functions.get(&effective_name.raw) {
             let call_block =
                 emit_direct_fn_call(scope, fn_ident, &args_setup, &args_slice, &cmd.redirects);
@@ -1872,8 +2123,9 @@ fn emit_command_call(ctx: &CodegenCtx, scope: &mut Scope, cmd: &CommandCall) -> 
         )
     };
 
-    let is_dynamic_cmd =
-        is_quoted_all_args(effective_name) || word_has_dynamic_parts(effective_name);
+    let is_dynamic_cmd = is_quoted_all_args(effective_name)
+        || word_has_dynamic_parts(effective_name)
+        || (!bypass_fns && ctx.redefined_functions.contains(&effective_name.raw));
     let shell_arg = if scope.in_function {
         quote! { __shell }
     } else {
@@ -2545,6 +2797,32 @@ fn emit_word_string_expr(scope: &Scope, word: &Word) -> TokenStream {
     }
 }
 
+fn escape_glob_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if matches!(ch, '*' | '?' | '[' | ']' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn emit_word_pattern_expr(scope: &Scope, word: &Word) -> TokenStream {
+    if word.parts.is_empty() {
+        return emit_word_str_expr(scope, word);
+    }
+    let mut escaped_word = word.clone();
+    for (idx, part) in escaped_word.parts.iter_mut().enumerate() {
+        if word.part_quoted.get(idx).copied().unwrap_or(false) {
+            if let WordPart::Literal(lit) = part {
+                *lit = escape_glob_literal(lit);
+            }
+        }
+    }
+    emit_word_str_expr(scope, &escaped_word)
+}
+
 fn emit_word_str_expr(scope: &Scope, word: &Word) -> TokenStream {
     let line = word.span.map(|s| s.start.line).unwrap_or(1);
     if word.parts.is_empty() {
@@ -2768,6 +3046,8 @@ fn emit_command_subst_raw_expr(scope: &Scope, stmt: &Stmt, fallback_raw: &str) -
     if stmt_uses_in_process_capture(&scope.functions, stmt) {
         let ctx = CodegenCtx {
             functions: scope.functions.clone(),
+            redefined_functions: HashSet::new(),
+            fn_def_idents: HashMap::new(),
             all_functions: Vec::new(),
             source_name: scope.source_name.clone(),
         };
@@ -2804,6 +3084,8 @@ fn emit_command_subst_expr(scope: &Scope, stmt: &Stmt, fallback_raw: &str) -> To
     if stmt_uses_in_process_capture(&scope.functions, stmt) {
         let ctx = CodegenCtx {
             functions: scope.functions.clone(),
+            redefined_functions: HashSet::new(),
+            fn_def_idents: HashMap::new(),
             all_functions: Vec::new(),
             source_name: scope.source_name.clone(),
         };
@@ -2914,6 +3196,8 @@ fn emit_command_subst_expr(scope: &Scope, stmt: &Stmt, fallback_raw: &str) -> To
             }
             let ctx = CodegenCtx {
                 functions: scope.functions.clone(),
+                redefined_functions: HashSet::new(),
+                fn_def_idents: HashMap::new(),
                 all_functions: Vec::new(),
                 source_name: scope.source_name.clone(),
             };
@@ -2945,6 +3229,8 @@ fn emit_command_subst_expr(scope: &Scope, stmt: &Stmt, fallback_raw: &str) -> To
         | Stmt::Test(_) => {
             let ctx = CodegenCtx {
                 functions: scope.functions.clone(),
+                redefined_functions: HashSet::new(),
+                fn_def_idents: HashMap::new(),
                 all_functions: Vec::new(),
                 source_name: scope.source_name.clone(),
             };
@@ -3064,6 +3350,12 @@ fn emit_param_expansion_expr(
     match op {
         ParamExpansionOp::Indirect => {
             let source_name = &scope.source_name;
+            if is_positional_var(name) {
+                let pos_expr = emit_positional_str_expr(scope, name);
+                return quote! {
+                    __shell.get_var_or_env_checked(#pos_expr, #source_name, #line)
+                };
+            }
             if let Some(binding) = scope.get(name) {
                 let ident = &binding.ident;
                 match binding.ty {
@@ -3137,6 +3429,89 @@ fn emit_param_expansion_expr(
                         let __idx = (#idx_arith).max(0) as usize;
                         __shell.get_array_elem(#name, __idx).to_owned()
                     }
+                }
+            }
+        }
+        ParamExpansionOp::ArrayElemTrim {
+            index,
+            pattern,
+            is_suffix,
+            longest,
+        } => {
+            let elem_expr = emit_param_expansion_expr(
+                scope,
+                name,
+                &ParamExpansionOp::ArrayElement {
+                    index: index.clone(),
+                },
+                line,
+            );
+            let pat_expr = emit_word_string_expr(scope, pattern);
+            quote! {
+                {
+                    let __val = #elem_expr;
+                    let __pat = #pat_expr;
+                    bash2rust_runtime::param_trim(__val.as_str(), __pat.as_str(), #is_suffix, #longest)
+                }
+            }
+        }
+        ParamExpansionOp::ArrayElemReplace {
+            index,
+            pattern,
+            replacement,
+            replace_all,
+        } => {
+            let elem_expr = emit_param_expansion_expr(
+                scope,
+                name,
+                &ParamExpansionOp::ArrayElement {
+                    index: index.clone(),
+                },
+                line,
+            );
+            let pat_expr = emit_word_string_expr(scope, pattern);
+            let repl_expr = emit_word_string_expr(scope, replacement);
+            quote! {
+                {
+                    let __val = #elem_expr;
+                    let __pat = #pat_expr;
+                    let __repl = #repl_expr;
+                    bash2rust_runtime::param_replace(
+                        __val.as_str(),
+                        __pat.as_str(),
+                        __repl.as_str(),
+                        #replace_all,
+                    )
+                }
+            }
+        }
+        ParamExpansionOp::ArrayElemSubstring {
+            index,
+            offset,
+            length,
+        } => {
+            let elem_expr = emit_param_expansion_expr(
+                scope,
+                name,
+                &ParamExpansionOp::ArrayElement {
+                    index: index.clone(),
+                },
+                line,
+            );
+            let off_expr = emit_arith_eval_i64(scope, &offset.raw);
+            let len_expr = match length {
+                Some(l) => {
+                    let le = emit_arith_eval_i64(scope, &l.raw);
+                    quote! { Some(#le) }
+                }
+                None => quote! { None::<i64> },
+            };
+            quote! {
+                {
+                    let __val = #elem_expr;
+                    let __off = #off_expr;
+                    let __len = #len_expr;
+                    bash2rust_runtime::param_substr(__val.as_str(), __off, __len)
                 }
             }
         }
@@ -3218,9 +3593,30 @@ fn emit_param_expansion_expr(
             replacement,
             replace_all,
         } => {
-            let val_expr = emit_param_target_str_expr(scope, name, line);
             let pat_expr = emit_word_string_expr(scope, pattern);
             let repl_expr = emit_word_string_expr(scope, replacement);
+            if name == "*" {
+                return quote! {
+                    {
+                        let __pat = #pat_expr;
+                        let __repl = #repl_expr;
+                        let __mapped: Vec<String> = args
+                            .iter()
+                            .map(|__a| {
+                                bash2rust_runtime::param_replace(
+                                    __a,
+                                    __pat.as_str(),
+                                    __repl.as_str(),
+                                    #replace_all,
+                                )
+                            })
+                            .collect();
+                        let __refs: Vec<&str> = __mapped.iter().map(String::as_str).collect();
+                        __shell.join_positional_args(&__refs)
+                    }
+                };
+            }
+            let val_expr = emit_param_target_str_expr(scope, name, line);
             quote! {
                 {
                     let __val = #val_expr;
@@ -3540,6 +3936,9 @@ fn emit_arith_eval_i64(scope: &Scope, expr: &str) -> TokenStream {
                 }
                 VarType::OwnedArray => {
                     pre_sync.push(quote! { __shell.set_array(#bash_name, #ident.clone()); });
+                    post_sync.push(quote! {
+                        #ident = __shell.get_array(#bash_name).to_vec();
+                    });
                 }
             }
         }
