@@ -453,20 +453,23 @@ fn emit_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStream {
                         }
                     })
                     .collect();
-                let exec_body = if block.redirects.is_empty() {
-                    quote! { #inner }
+                let (pre_redir, post_redir) = if block.redirects.is_empty() {
+                    (quote! {}, quote! {})
                 } else {
                     let (redir_bindings, redir_specs_in) =
                         emit_redirect_specs_with_bindings(scope, &block.redirects);
                     let redir_specs_out = redir_specs_in.clone();
-                    quote! {
-                        #(#redir_bindings)*
-                        __shell.push_stdin_from_redirects(&[#(#redir_specs_in),*])?;
-                        __shell.push_stdout_capture();
-                        #inner
-                        let __captured = __shell.pop_stdout_capture_raw();
-                        __shell.apply_captured_redirects(&__captured, &[#(#redir_specs_out),*])?;
-                    }
+                    (
+                        quote! {
+                            #(#redir_bindings)*
+                            __shell.push_stdin_from_redirects(&[#(#redir_specs_in),*])?;
+                            __shell.push_stdout_capture();
+                        },
+                        quote! {
+                            let __captured = __shell.pop_stdout_capture_raw();
+                            __shell.apply_captured_redirects(&__captured, &[#(#redir_specs_out),*])?;
+                        },
+                    )
                 };
                 let errexit_after = if scope.unguarded {
                     quote! {}
@@ -477,16 +480,18 @@ fn emit_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStream {
                     {
                         let __saved_cwd = std::env::current_dir().ok();
                         let __saved_vars = __shell.vars_snapshot();
+                        let __saved_stdin = __shell.take_stdin_override();
                         let __saved_opts = (
                             __shell.errexit,
                             __shell.nounset,
                             __shell.pipefail,
                             __shell.ifs.clone(),
                         );
+                        #pre_redir
                         __shell.enter_subshell();
                         let __sub_res = (|| -> Result<(), Box<dyn std::error::Error>> {
                             #(#shadows)*
-                            #exec_body
+                            #inner
                             Ok(())
                         })();
                         __shell.leave_subshell();
@@ -498,6 +503,8 @@ fn emit_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStream {
                         if let Some(__d) = __saved_cwd {
                             let _ = std::env::set_current_dir(__d);
                         }
+                        #post_redir
+                        __shell.set_stdin_override(__saved_stdin);
                         if let Err(__e) = __sub_res {
                             if let Some(bash2rust_runtime::RuntimeError::SubshellExit(__code)) =
                                 __e.downcast_ref::<bash2rust_runtime::RuntimeError>()

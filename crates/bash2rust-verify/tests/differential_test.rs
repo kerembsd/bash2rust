@@ -97,3 +97,18 @@ fn differential_report_detects_and_formats_mismatch() {
     let err = VerifyError::Mismatch(Box::new(report));
     assert!(err.to_string().contains("Differential mismatch"));
 }
+
+#[test]
+fn differential_redirected_subshell_early_exit() {
+    let dir = std::env::temp_dir().join(format!("bash2rust_redir_subshell_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let script = dir.join("redir_subshell_exit.sh");
+    std::fs::write(
+        &script,
+        "#!/usr/bin/env bash\n( echo \"redir_line\"; exit 7 ) > out.txt\nrc=$?\necho \"after_redir:$rc:$(cat out.txt)\"\nrm -f out.txt\n",
+    )
+    .expect("write script");
+    let res = assert_differential_match(&script);
+    let _ = std::fs::remove_dir_all(&dir);
+    res.expect("redirected subshell early exit match");
+}
