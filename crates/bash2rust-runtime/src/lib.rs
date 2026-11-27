@@ -20,6 +20,12 @@ use thiserror::Error;
 
 mod source_interp;
 
+/// Embedded source of `bash2rust-runtime/src/lib.rs` for `--standalone` output.
+pub const EMBEDDED_RUNTIME_SOURCE: &str = include_str!("lib.rs");
+
+/// Embedded source of `bash2rust-runtime/src/source_interp.rs` for `--standalone` output.
+pub const EMBEDDED_SOURCE_INTERP_SOURCE: &str = include_str!("source_interp.rs");
+
 static SIGINT_PENDING: AtomicBool = AtomicBool::new(false);
 static SIGTERM_PENDING: AtomicBool = AtomicBool::new(false);
 

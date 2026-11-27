@@ -51,6 +51,10 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     runtime_path: Option<PathBuf>,
 
+    /// Emit a self-contained Cargo project with embedded runtime (default when `--runtime-path` is omitted).
+    #[arg(long)]
+    standalone: bool,
+
     /// Hybrid AI fallback provider for unsupported Bash constructs.
     #[arg(long, value_enum, default_value_t = AiMode::None)]
     ai: AiMode,
@@ -149,16 +153,29 @@ async fn main() -> Result<()> {
             target_dir,
             cli.name.as_deref(),
             cli.runtime_path.as_deref(),
+            cli.standalone,
             &rust_code,
         )?;
-        println!(
-            "Migrated `{}` -> Cargo project `{}` at `{}`\n  - {}\n  - {}",
-            cli.file.display(),
-            project.package_name,
-            project.target_dir.display(),
-            project.cargo_toml_path.display(),
-            project.main_rs_path.display(),
-        );
+        if let Some(runtime_rs) = &project.runtime_rs_path {
+            println!(
+                "Migrated `{}` -> Cargo project `{}` at `{}`\n  - {}\n  - {}\n  - {}",
+                cli.file.display(),
+                project.package_name,
+                project.target_dir.display(),
+                project.cargo_toml_path.display(),
+                project.main_rs_path.display(),
+                runtime_rs.display(),
+            );
+        } else {
+            println!(
+                "Migrated `{}` -> Cargo project `{}` at `{}`\n  - {}\n  - {}",
+                cli.file.display(),
+                project.package_name,
+                project.target_dir.display(),
+                project.cargo_toml_path.display(),
+                project.main_rs_path.display(),
+            );
+        }
         return Ok(());
     }
 

@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 bash2rust-ai.workspace = true
 bash2rust-core.workspace = true
+bash2rust-runtime.workspace = true
 bash2rust-verify.workspace = true
 anyhow.workspace = true
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }

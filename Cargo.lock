@@ -151,6 +151,7 @@ dependencies = [
  "anyhow",
  "bash2rust-ai",
  "bash2rust-core",
+ "bash2rust-runtime",
  "bash2rust-verify",
  "clap",
  "serde_json",

@@ -55,15 +55,26 @@ fn assert_migrated_project_matches_bash(fixture_name: &str, expected_pkg_name: &
 
     let cargo_toml = project_dir.join("Cargo.toml");
     let main_rs = project_dir.join("src/main.rs");
+    let runtime_rs = project_dir.join("src/runtime.rs");
     assert!(cargo_toml.is_file(), "missing Cargo.toml");
     assert!(main_rs.is_file(), "missing src/main.rs");
+    assert!(
+        runtime_rs.is_file(),
+        "missing src/runtime.rs in standalone mode"
+    );
 
     let toml_text = fs::read_to_string(&cargo_toml).expect("read Cargo.toml");
     assert!(
         toml_text.contains(&format!("name = \"{expected_pkg_name}\"")),
         "unexpected Cargo.toml:\n{toml_text}"
     );
-    assert!(toml_text.contains("bash2rust-runtime"));
+    assert!(
+        !toml_text.contains("bash2rust-runtime"),
+        "standalone Cargo.toml must not depend on bash2rust-runtime:\n{toml_text}"
+    );
+    assert!(toml_text.contains("libc = \"0.2\""));
+    assert!(toml_text.contains("regex = \"1\""));
+    assert!(toml_text.contains("thiserror = \"2.0\""));
     assert!(toml_text.contains("[workspace]"));
 
     let cargo_bin = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
@@ -158,5 +169,39 @@ fn cli_emit_rust_resolves_static_source() {
     assert!(
         rust_stdout.contains("hello_static") && !rust_stdout.contains("source_file("),
         "expected static source inlining, got:\n{rust_stdout}"
+    );
+}
+
+#[test]
+fn migrate_runtime_path_mode_uses_path_dependency() {
+    let fixture = fixture_path("01_variables_basic.sh");
+    let tmp = TempDirGuard::create("bash2rust_migrate_path");
+    let project_dir = tmp.path.join("migrated");
+    let runtime_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bash2rust-runtime");
+
+    let bin = env!("CARGO_BIN_EXE_bash2rust");
+    let migrate_out = Command::new(bin)
+        .arg("--file")
+        .arg(&fixture)
+        .arg("--migrate")
+        .arg(&project_dir)
+        .arg("--runtime-path")
+        .arg(&runtime_dir)
+        .output()
+        .expect("run bash2rust --migrate --runtime-path");
+    assert!(
+        migrate_out.status.success(),
+        "bash2rust --migrate --runtime-path failed: {}",
+        String::from_utf8_lossy(&migrate_out.stderr)
+    );
+
+    let toml_text = fs::read_to_string(project_dir.join("Cargo.toml")).expect("read Cargo.toml");
+    assert!(
+        toml_text.contains("bash2rust-runtime = { path ="),
+        "expected path dependency in Cargo.toml:\n{toml_text}"
+    );
+    assert!(
+        !project_dir.join("src/runtime.rs").exists(),
+        "runtime-path mode must not emit src/runtime.rs"
     );
 }
