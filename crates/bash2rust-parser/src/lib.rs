@@ -10,7 +10,7 @@ use std::path::Path;
 use bash2rust_ir::IrProgram;
 use brush_parser::{ast, Parser, ParserOptions, SourceInfo};
 
-pub use error::{LowerError, ParserError};
+pub use error::{format_unsupported_diagnostic, BashDiagnostic, LowerError, ParserError};
 pub use lower::lower_program;
 
 /// A parsed Bash script retaining its [`SourceInfo`] and [`ast::Program`].
@@ -25,14 +25,21 @@ pub fn parse_str(
     source: &str,
     source_name: impl Into<String>,
 ) -> Result<ParsedScript, ParserError> {
+    let source_name_str = source_name.into();
     let options = ParserOptions::default();
     let reader = BufReader::new(source.as_bytes());
     let mut parser = Parser::new(reader, &options);
-    let program = parser.parse_program()?;
+    let program = parser.parse_program().map_err(|err| {
+        ParserError::RichParse(Box::new(BashDiagnostic::from_parse_error(
+            err,
+            &source_name_str,
+            source,
+        )))
+    })?;
 
     Ok(ParsedScript {
         source_info: SourceInfo {
-            source: source_name.into(),
+            source: source_name_str,
         },
         program,
     })
@@ -42,10 +49,17 @@ pub fn parse_str(
 pub fn parse_file(path: impl AsRef<Path>) -> Result<ParsedScript, ParserError> {
     let path_ref = path.as_ref();
     let content = std::fs::read_to_string(path_ref)?;
+    let source_name_str = path_ref.display().to_string();
     let options = ParserOptions::default();
     let reader = BufReader::new(content.as_bytes());
     let mut parser = Parser::new(reader, &options);
-    let program = parser.parse_program()?;
+    let program = parser.parse_program().map_err(|err| {
+        ParserError::RichParse(Box::new(BashDiagnostic::from_parse_error(
+            err,
+            &source_name_str,
+            &content,
+        )))
+    })?;
 
     Ok(ParsedScript {
         source_info: SourceInfo::from(path_ref.to_path_buf()),

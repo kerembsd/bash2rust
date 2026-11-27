@@ -6,12 +6,13 @@ use std::pin::Pin;
 
 pub use bash2rust_ai as ai;
 pub use bash2rust_codegen as codegen;
+pub use bash2rust_parser::{BashDiagnostic, LowerError, ParserError};
 pub use bash2rust_runtime as runtime;
 
 use bash2rust_ai::AiProvider;
 use bash2rust_codegen::{generate_rust, parse_rust_snippet, CodegenError};
 use bash2rust_ir::{Block, IrProgram, Stmt};
-use bash2rust_parser::{parse_file_to_ir, parse_str_to_ir, LowerError};
+use bash2rust_parser::{parse_file_to_ir, parse_str_to_ir};
 use thiserror::Error;
 
 /// Errors returned by the `bash2rust` compilation pipeline.

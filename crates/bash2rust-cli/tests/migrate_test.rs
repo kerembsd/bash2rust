@@ -205,3 +205,45 @@ fn migrate_runtime_path_mode_uses_path_dependency() {
         "runtime-path mode must not emit src/runtime.rs"
     );
 }
+
+#[test]
+fn cli_renders_miette_diagnostic_on_syntax_errors() {
+    let bin = env!("CARGO_BIN_EXE_bash2rust");
+    let tmp = TempDirGuard::create("bash2rust_cli_diag");
+
+    let unclosed_if = tmp.path.join("unclosed_if.sh");
+    fs::write(
+        &unclosed_if,
+        "echo start\nif [ -f /etc/hosts ]; then\n  echo hi\n",
+    )
+    .expect("write unclosed_if.sh");
+
+    let out_if = Command::new(bin)
+        .arg("--file")
+        .arg(&unclosed_if)
+        .args(["--emit", "rust"])
+        .output()
+        .expect("run bash2rust on unclosed_if.sh");
+    assert!(!out_if.status.success(), "expected non-zero exit code");
+    let stderr_if = String::from_utf8_lossy(&out_if.stderr);
+    assert!(
+        stderr_if.contains("unclosed_if.sh") && stderr_if.contains("help:"),
+        "expected miette diagnostic with filename and help, got:\n{stderr_if}"
+    );
+
+    let unclosed_quote = tmp.path.join("unclosed_quote.sh");
+    fs::write(&unclosed_quote, "x=1\ny=\"hello\necho z\n").expect("write unclosed_quote.sh");
+
+    let out_q = Command::new(bin)
+        .arg("--file")
+        .arg(&unclosed_quote)
+        .args(["--emit", "rust"])
+        .output()
+        .expect("run bash2rust on unclosed_quote.sh");
+    assert!(!out_q.status.success(), "expected non-zero exit code");
+    let stderr_q = String::from_utf8_lossy(&out_q.stderr);
+    assert!(
+        stderr_q.contains("unclosed_quote.sh") && stderr_q.contains("help:"),
+        "expected miette diagnostic for unclosed quote, got:\n{stderr_q}"
+    );
+}

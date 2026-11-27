@@ -20,6 +20,7 @@ bash2rust-core.workspace = true
 bash2rust-runtime.workspace = true
 bash2rust-verify.workspace = true
 anyhow.workspace = true
+miette.workspace = true
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 clap.workspace = true
 serde_json.workspace = true

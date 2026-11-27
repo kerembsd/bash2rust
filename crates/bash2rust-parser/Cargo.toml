@@ -13,6 +13,7 @@ categories = ["compilers", "parsing"]
 [dependencies]
 bash2rust-ir.workspace = true
 brush-parser.workspace = true
+miette.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

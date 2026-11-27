@@ -105,7 +105,21 @@ fn build_ai_provider(cli: &Cli) -> Result<Option<Box<dyn AiProvider>>> {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    if let Err(err) = run().await {
+        if let Some(bash2rust_core::CompileError::Frontend(bash2rust_core::LowerError::Parser(
+            bash2rust_core::ParserError::RichParse(diag),
+        ))) = err.downcast_ref::<bash2rust_core::CompileError>()
+        {
+            eprintln!("{:?}", miette::Report::new((**diag).clone()));
+        } else {
+            eprintln!("Error: {err:?}");
+        }
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<()> {
     let cli = Cli::parse();
     let mut output = bash2rust_core::compile_file_to_ir(&cli.file)
         .with_context(|| format!("failed to compile `{}`", cli.file.display()))?;
