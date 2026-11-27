@@ -1549,47 +1549,66 @@ fn emit_test_expr_with(scope: &Scope, expr: &TestExpr) -> TokenStream {
     match expr {
         TestExpr::FileTest { op, path } => {
             let path_expr = emit_word_str_expr(scope, path);
-            let helper = match op {
-                FileTestOp::Dir => quote! { bash2rust_runtime::test_dir },
-                FileTestOp::File => quote! { bash2rust_runtime::test_file },
-                FileTestOp::Exists => quote! { bash2rust_runtime::test_exists },
-                FileTestOp::Readable => quote! { bash2rust_runtime::test_readable },
-                FileTestOp::Writable => quote! { bash2rust_runtime::test_writable },
-                FileTestOp::NonEmptyFile => quote! { bash2rust_runtime::test_non_empty_file },
-                FileTestOp::Symlink => quote! { bash2rust_runtime::test_symlink },
-                FileTestOp::BlockDevice => quote! { bash2rust_runtime::test_block_device },
-                FileTestOp::CharDevice => quote! { bash2rust_runtime::test_char_device },
-                FileTestOp::Executable => quote! { bash2rust_runtime::test_executable },
-                FileTestOp::FdIsTerminal => quote! { bash2rust_runtime::test_fd_terminal },
-            };
-            quote! { #helper(#path_expr) }
+            match op {
+                FileTestOp::Dir => quote! { std::path::Path::new(#path_expr).is_dir() },
+                FileTestOp::File => quote! { std::path::Path::new(#path_expr).is_file() },
+                FileTestOp::Exists => quote! { std::path::Path::new(#path_expr).exists() },
+                FileTestOp::Readable => quote! { bash2rust_runtime::test_readable(#path_expr) },
+                FileTestOp::Writable => quote! { bash2rust_runtime::test_writable(#path_expr) },
+                FileTestOp::NonEmptyFile => {
+                    quote! { bash2rust_runtime::test_non_empty_file(#path_expr) }
+                }
+                FileTestOp::Symlink => quote! { bash2rust_runtime::test_symlink(#path_expr) },
+                FileTestOp::BlockDevice => {
+                    quote! { bash2rust_runtime::test_block_device(#path_expr) }
+                }
+                FileTestOp::CharDevice => {
+                    quote! { bash2rust_runtime::test_char_device(#path_expr) }
+                }
+                FileTestOp::Executable => quote! { bash2rust_runtime::test_executable(#path_expr) },
+                FileTestOp::FdIsTerminal => {
+                    quote! { bash2rust_runtime::test_fd_terminal(#path_expr) }
+                }
+            }
         }
         TestExpr::Unary { op, operand } => {
             let op_expr = emit_word_str_expr(scope, operand);
-            let helper = match op {
-                UnaryTestOp::StrEmpty => quote! { bash2rust_runtime::test_str_empty },
-                UnaryTestOp::StrNonEmpty => quote! { bash2rust_runtime::test_str_non_empty },
-            };
-            quote! { #helper(#op_expr) }
+            match op {
+                UnaryTestOp::StrEmpty => quote! { (#op_expr).is_empty() },
+                UnaryTestOp::StrNonEmpty => quote! { !(#op_expr).is_empty() },
+            }
         }
         TestExpr::Binary { op, lhs, rhs } => {
             let lhs_expr = emit_word_str_expr(scope, lhs);
             let rhs_expr = emit_word_str_expr(scope, rhs);
-            let helper = match op {
-                BinaryTestOp::StrEq => quote! { bash2rust_runtime::test_str_eq },
-                BinaryTestOp::StrNe => quote! { bash2rust_runtime::test_str_ne },
-                BinaryTestOp::IntEq => quote! { bash2rust_runtime::test_int_eq },
-                BinaryTestOp::IntNe => quote! { bash2rust_runtime::test_int_ne },
-                BinaryTestOp::IntLt => quote! { bash2rust_runtime::test_int_lt },
-                BinaryTestOp::IntLe => quote! { bash2rust_runtime::test_int_le },
-                BinaryTestOp::IntGt => quote! { bash2rust_runtime::test_int_gt },
-                BinaryTestOp::IntGe => quote! { bash2rust_runtime::test_int_ge },
-                BinaryTestOp::RegexMatch => quote! { bash2rust_runtime::test_regex_match },
-                BinaryTestOp::PatternMatch => {
-                    return quote! { bash2rust_runtime::pattern_match(#rhs_expr, #lhs_expr) };
+            match op {
+                BinaryTestOp::StrEq => quote! { (#lhs_expr) == (#rhs_expr) },
+                BinaryTestOp::StrNe => quote! { (#lhs_expr) != (#rhs_expr) },
+                BinaryTestOp::IntEq => {
+                    quote! { bash2rust_runtime::test_int_eq(#lhs_expr, #rhs_expr) }
                 }
-            };
-            quote! { #helper(#lhs_expr, #rhs_expr) }
+                BinaryTestOp::IntNe => {
+                    quote! { bash2rust_runtime::test_int_ne(#lhs_expr, #rhs_expr) }
+                }
+                BinaryTestOp::IntLt => {
+                    quote! { bash2rust_runtime::test_int_lt(#lhs_expr, #rhs_expr) }
+                }
+                BinaryTestOp::IntLe => {
+                    quote! { bash2rust_runtime::test_int_le(#lhs_expr, #rhs_expr) }
+                }
+                BinaryTestOp::IntGt => {
+                    quote! { bash2rust_runtime::test_int_gt(#lhs_expr, #rhs_expr) }
+                }
+                BinaryTestOp::IntGe => {
+                    quote! { bash2rust_runtime::test_int_ge(#lhs_expr, #rhs_expr) }
+                }
+                BinaryTestOp::RegexMatch => {
+                    quote! { bash2rust_runtime::test_regex_match(#lhs_expr, #rhs_expr) }
+                }
+                BinaryTestOp::PatternMatch => {
+                    quote! { bash2rust_runtime::pattern_match(#rhs_expr, #lhs_expr) }
+                }
+            }
         }
         TestExpr::Not(inner) => {
             let inner_expr = emit_test_expr_with(scope, inner);
@@ -3045,7 +3064,111 @@ fn emit_param_expansion_expr(
     }
 }
 
+fn try_emit_pure_arith_atom(scope: &Scope, atom: &str) -> Option<TokenStream> {
+    let s = atom.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(n) = s.parse::<i64>() {
+        return Some(quote! { #n });
+    }
+    let var_name = s.strip_prefix('$').unwrap_or(s);
+    if !var_name.is_empty()
+        && var_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !var_name.chars().next().is_some_and(|c| c.is_ascii_digit())
+    {
+        if let Some(binding) = scope.get(var_name) {
+            let ident = &binding.ident;
+            return match binding.ty {
+                VarType::OwnedString | VarType::StrSlice => {
+                    Some(quote! { #ident.trim().parse::<i64>().unwrap_or(0) })
+                }
+                VarType::OwnedArray => None,
+            };
+        }
+    }
+    None
+}
+
+fn try_emit_pure_arith_i64(scope: &Scope, expr: &str) -> Option<TokenStream> {
+    let mut s = expr.trim();
+    while s.starts_with('(') && s.ends_with(')') {
+        let inner = &s[1..s.len() - 1];
+        let mut depth = 0i32;
+        let mut balanced = true;
+        for ch in inner.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        balanced = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if balanced && depth == 0 {
+            s = inner.trim();
+        } else {
+            break;
+        }
+    }
+    if s.is_empty()
+        || s.contains(['=', '[', ']', '?', ':', ',', ';', '&', '|', '^', '~', '!'])
+        || s.contains("++")
+        || s.contains("--")
+        || s.contains("<<")
+        || s.contains(">>")
+    {
+        return None;
+    }
+    if let Some(atom) = try_emit_pure_arith_atom(scope, s) {
+        return Some(atom);
+    }
+
+    const OPS: &[&str] = &["==", "!=", "<=", ">=", "<", ">", "+", "-", "*", "/", "%"];
+    for &op in OPS {
+        let mut matches = s.match_indices(op);
+        if let (Some((idx, _)), None) = (matches.next(), matches.next()) {
+            let lhs_str = s[..idx].trim();
+            let rhs_str = s[idx + op.len()..].trim();
+            if lhs_str.is_empty() || rhs_str.is_empty() {
+                continue;
+            }
+            let (Some(lhs), Some(rhs)) = (
+                try_emit_pure_arith_atom(scope, lhs_str),
+                try_emit_pure_arith_atom(scope, rhs_str),
+            ) else {
+                continue;
+            };
+            let tokens = match op {
+                "+" => quote! { (#lhs).wrapping_add(#rhs) },
+                "-" => quote! { (#lhs).wrapping_sub(#rhs) },
+                "*" => quote! { (#lhs).wrapping_mul(#rhs) },
+                "/" => quote! { (#lhs).checked_div(#rhs).unwrap_or(0) },
+                "%" => quote! { (#lhs).checked_rem(#rhs).unwrap_or(0) },
+                "==" => quote! { if (#lhs) == (#rhs) { 1i64 } else { 0i64 } },
+                "!=" => quote! { if (#lhs) != (#rhs) { 1i64 } else { 0i64 } },
+                "<" => quote! { if (#lhs) < (#rhs) { 1i64 } else { 0i64 } },
+                "<=" => quote! { if (#lhs) <= (#rhs) { 1i64 } else { 0i64 } },
+                ">" => quote! { if (#lhs) > (#rhs) { 1i64 } else { 0i64 } },
+                ">=" => quote! { if (#lhs) >= (#rhs) { 1i64 } else { 0i64 } },
+                _ => return None,
+            };
+            return Some(tokens);
+        }
+    }
+    None
+}
+
 fn emit_arith_eval_i64(scope: &Scope, expr: &str) -> TokenStream {
+    if let Some(pure) = try_emit_pure_arith_i64(scope, expr) {
+        return pure;
+    }
     let mut pre_sync = Vec::new();
     let mut post_sync = Vec::new();
     for (bash_name, binding) in &scope.vars {

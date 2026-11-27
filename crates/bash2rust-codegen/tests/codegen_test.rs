@@ -169,7 +169,7 @@ fn emits_runtime_calls_for_subst_pipelines_and_tests() {
         parse_str_to_ir("if [ -d /var/log ]; then echo ok; fi\n", "test.sh").expect("parse");
     let rust_test = generate_rust(&ir_test).expect("gen");
     assert!(
-        rust_test.contains("if bash2rust_runtime::test_dir(\"/var/log\")"),
+        rust_test.contains("if std::path::Path::new(\"/var/log\").is_dir()"),
         "unexpected:\n{rust_test}"
     );
 
@@ -181,7 +181,7 @@ fn emits_runtime_calls_for_subst_pipelines_and_tests() {
     let rust_and_or = generate_rust(&ir_and_or).expect("gen");
     assert!(
         rust_and_or.contains(
-            "if (!(bash2rust_runtime::test_file(\"/a\"))) && (bash2rust_runtime::test_exists(\"/b\"))"
+            "if (!(std::path::Path::new(\"/a\").is_file())) && (std::path::Path::new(\"/b\").exists())"
         ),
         "unexpected:\n{rust_and_or}"
     );
@@ -351,6 +351,55 @@ printf "%s\n" "$kind"
     assert!(
         rust_code.contains(".chars().count().to_string()"),
         "expected length expansion in:\n{rust_code}"
+    );
+    syn::parse_file(&rust_code).expect("valid syn::File");
+}
+
+#[test]
+fn emits_idiomatic_peephole_rust_forms() {
+    let src = r#"#!/usr/bin/env bash
+x=5
+y=$((x + 3))
+z=$((10 / 2))
+if [ -f "/etc/hosts" ] && [ -d "/tmp" ] && [ -e "/etc" ]; then
+    echo "fs"
+fi
+if [ -z "$x" ] || [ -n "$y" ]; then
+    echo "str"
+fi
+if [ "$x" = "5" ] && [ "$y" != "0" ]; then
+    echo "cmp"
+fi
+for item in a b c; do
+    echo "$item"
+done
+"#;
+    let ir = parse_str_to_ir(src, "peephole.sh").expect("parse");
+    let rust_code = generate_rust(&ir).expect("generate rust");
+    assert!(
+        rust_code.contains("std::path::Path::new(\"/etc/hosts\").is_file()"),
+        "expected Path::new(...).is_file() in:\n{rust_code}"
+    );
+    assert!(
+        rust_code.contains("std::path::Path::new(\"/tmp\").is_dir()")
+            && rust_code.contains("std::path::Path::new(\"/etc\").exists()"),
+        "expected is_dir/exists in:\n{rust_code}"
+    );
+    assert!(
+        rust_code.contains(".is_empty()"),
+        "expected .is_empty() in:\n{rust_code}"
+    );
+    assert!(
+        rust_code.contains("==") && rust_code.contains("!="),
+        "expected == and != in:\n{rust_code}"
+    );
+    assert!(
+        rust_code.contains("for item in [\"a\", \"b\", \"c\"]"),
+        "expected static word list for loop in:\n{rust_code}"
+    );
+    assert!(
+        rust_code.contains("wrapping_add") && rust_code.contains("checked_div"),
+        "expected pure arithmetic peephole in:\n{rust_code}"
     );
     syn::parse_file(&rust_code).expect("valid syn::File");
 }
