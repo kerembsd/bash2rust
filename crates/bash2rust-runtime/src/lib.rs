@@ -61,6 +61,9 @@ pub enum RuntimeError {
 
     #[error("cannot execute an empty pipeline")]
     EmptyPipeline,
+
+    #[error("subshell exited with status {0}")]
+    SubshellExit(i32),
 }
 
 /// Convenience result alias for runtime operations.
@@ -123,6 +126,7 @@ pub struct ShellState {
     pub last_status: i32,
     pub errexit: bool,
     pub errexit_suppress: usize,
+    pub subshell_depth: usize,
     pub nounset: bool,
     pub pipefail: bool,
     pub ifs: Option<String>,
@@ -150,6 +154,7 @@ impl Default for ShellState {
             last_status: 0,
             errexit: false,
             errexit_suppress: 0,
+            subshell_depth: 0,
             nounset: false,
             pipefail: false,
             ifs: None,
@@ -185,6 +190,21 @@ impl ShellState {
     pub fn restore_vars(&mut self, snap: (HashMap<String, String>, HashMap<String, Vec<String>>)) {
         self.vars = snap.0;
         self.arrays = snap.1;
+    }
+
+    /// Enters a subshell scope.
+    pub fn enter_subshell(&mut self) {
+        self.subshell_depth += 1;
+    }
+
+    /// Leaves a subshell scope.
+    pub fn leave_subshell(&mut self) {
+        self.subshell_depth = self.subshell_depth.saturating_sub(1);
+    }
+
+    /// Returns `true` if currently executing inside a subshell.
+    pub fn in_subshell(&self) -> bool {
+        self.subshell_depth > 0
     }
 
     /// Runs the registered `EXIT` trap at most once, if any.
@@ -788,13 +808,17 @@ impl ShellState {
     }
 
     /// Exits immediately with `last_status` if `errexit` (`set -e`) is enabled and `last_status != 0`.
-    pub fn check_errexit(&mut self) {
+    pub fn check_errexit(&mut self) -> RuntimeResult<()> {
         self.check_signals();
         if self.errexit && self.errexit_suppress == 0 && self.last_status != 0 {
             let code = self.last_status;
+            if self.subshell_depth > 0 {
+                return Err(RuntimeError::SubshellExit(code));
+            }
             self.run_exit_trap();
             std::process::exit(code);
         }
+        Ok(())
     }
 
     /// Reads an environment variable, exiting with Bash's `unbound variable` error if `nounset` (`set -u`) is enabled.
@@ -995,6 +1019,9 @@ impl ShellState {
                     .first()
                     .and_then(|s| s.parse::<i32>().ok())
                     .unwrap_or(self.last_status);
+                if self.subshell_depth > 0 {
+                    return Err(RuntimeError::SubshellExit(code));
+                }
                 self.run_exit_trap();
                 std::process::exit(code);
             }

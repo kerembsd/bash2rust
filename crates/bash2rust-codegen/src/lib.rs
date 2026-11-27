@@ -435,32 +435,31 @@ fn emit_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStream {
         Stmt::Function(_) => quote! {},
         Stmt::Return { code, .. } => emit_return_stmt(scope, code.as_ref()),
         Stmt::Block(block) => {
-            let inner = emit_block_with(ctx, scope, block);
-            let subshell_wrap = |body: TokenStream| -> TokenStream {
-                if block.is_subshell {
-                    quote! {
-                        {
-                            let __saved_cwd = std::env::current_dir().ok();
-                            let __saved_vars = __shell.vars_snapshot();
-                            #body
-                            __shell.restore_vars(__saved_vars);
-                            if let Some(__d) = __saved_cwd {
-                                let _ = std::env::set_current_dir(__d);
+            if block.is_subshell {
+                let mut sub_scope = scope.clone();
+                let inner = emit_block_with(ctx, &mut sub_scope, block);
+                let shadows: Vec<TokenStream> = scope
+                    .vars
+                    .values()
+                    .map(|b| {
+                        let ident = &b.ident;
+                        match b.ty {
+                            VarType::OwnedString | VarType::OwnedArray => {
+                                quote! { let mut #ident = #ident.clone(); }
+                            }
+                            VarType::StrSlice => {
+                                quote! { let #ident = #ident; }
                             }
                         }
-                    }
+                    })
+                    .collect();
+                let exec_body = if block.redirects.is_empty() {
+                    quote! { #inner }
                 } else {
-                    body
-                }
-            };
-            if block.redirects.is_empty() {
-                subshell_wrap(quote! { { #inner } })
-            } else {
-                let (redir_bindings, redir_specs_in) =
-                    emit_redirect_specs_with_bindings(scope, &block.redirects);
-                let redir_specs_out = redir_specs_in.clone();
-                subshell_wrap(quote! {
-                    {
+                    let (redir_bindings, redir_specs_in) =
+                        emit_redirect_specs_with_bindings(scope, &block.redirects);
+                    let redir_specs_out = redir_specs_in.clone();
+                    quote! {
                         #(#redir_bindings)*
                         __shell.push_stdin_from_redirects(&[#(#redir_specs_in),*])?;
                         __shell.push_stdout_capture();
@@ -468,7 +467,68 @@ fn emit_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStream {
                         let __captured = __shell.pop_stdout_capture_raw();
                         __shell.apply_captured_redirects(&__captured, &[#(#redir_specs_out),*])?;
                     }
-                })
+                };
+                let errexit_after = if scope.unguarded {
+                    quote! {}
+                } else {
+                    quote! { __shell.check_errexit()?; }
+                };
+                quote! {
+                    {
+                        let __saved_cwd = std::env::current_dir().ok();
+                        let __saved_vars = __shell.vars_snapshot();
+                        let __saved_opts = (
+                            __shell.errexit,
+                            __shell.nounset,
+                            __shell.pipefail,
+                            __shell.ifs.clone(),
+                        );
+                        __shell.enter_subshell();
+                        let __sub_res = (|| -> Result<(), Box<dyn std::error::Error>> {
+                            #(#shadows)*
+                            #exec_body
+                            Ok(())
+                        })();
+                        __shell.leave_subshell();
+                        __shell.restore_vars(__saved_vars);
+                        __shell.errexit = __saved_opts.0;
+                        __shell.nounset = __saved_opts.1;
+                        __shell.pipefail = __saved_opts.2;
+                        __shell.ifs = __saved_opts.3;
+                        if let Some(__d) = __saved_cwd {
+                            let _ = std::env::set_current_dir(__d);
+                        }
+                        if let Err(__e) = __sub_res {
+                            if let Some(bash2rust_runtime::RuntimeError::SubshellExit(__code)) =
+                                __e.downcast_ref::<bash2rust_runtime::RuntimeError>()
+                            {
+                                __shell.set_status(*__code);
+                            } else {
+                                return Err(__e);
+                            }
+                        }
+                        #errexit_after
+                    }
+                }
+            } else {
+                let inner = emit_block_with(ctx, scope, block);
+                if block.redirects.is_empty() {
+                    quote! { { #inner } }
+                } else {
+                    let (redir_bindings, redir_specs_in) =
+                        emit_redirect_specs_with_bindings(scope, &block.redirects);
+                    let redir_specs_out = redir_specs_in.clone();
+                    quote! {
+                        {
+                            #(#redir_bindings)*
+                            __shell.push_stdin_from_redirects(&[#(#redir_specs_in),*])?;
+                            __shell.push_stdout_capture();
+                            #inner
+                            let __captured = __shell.pop_stdout_capture_raw();
+                            __shell.apply_captured_redirects(&__captured, &[#(#redir_specs_out),*])?;
+                        }
+                    }
+                }
             }
         }
         Stmt::Command(cmd) => emit_command_call(ctx, scope, cmd),
@@ -595,7 +655,7 @@ fn emit_assignment_with(scope: &mut Scope, assign: &Assignment) -> TokenStream {
         } else {
             quote! {
                 #body
-                __shell.check_errexit();
+                __shell.check_errexit()?;
             }
         }
     } else {
@@ -1462,7 +1522,16 @@ fn emit_command_call(ctx: &CodegenCtx, scope: &mut Scope, cmd: &CommandCall) -> 
             })
             .unwrap_or_else(|| quote! { __shell.last_status });
         return quote! {
-            std::process::exit(#code_expr);
+            {
+                let __exit_code = #code_expr;
+                if __shell.in_subshell() {
+                    return Err(Box::new(bash2rust_runtime::RuntimeError::SubshellExit(
+                        __exit_code,
+                    )));
+                }
+                __shell.run_exit_trap();
+                std::process::exit(__exit_code);
+            }
         };
     }
 
@@ -1479,7 +1548,7 @@ fn emit_command_call(ctx: &CodegenCtx, scope: &mut Scope, cmd: &CommandCall) -> 
         let errexit_stmt = if scope.unguarded {
             quote! {}
         } else {
-            quote! { __shell.check_errexit(); }
+            quote! { __shell.check_errexit()?; }
         };
         let shift_stmt = emit_shift_stmt(scope, &cmd.args);
         return quote! {
@@ -1506,7 +1575,7 @@ fn emit_command_call(ctx: &CodegenCtx, scope: &mut Scope, cmd: &CommandCall) -> 
     let errexit_stmt = if scope.unguarded {
         quote! {}
     } else {
-        quote! { __shell.check_errexit(); }
+        quote! { __shell.check_errexit()?; }
     };
 
     // Direct call to a hoisted Bash function if defined in this script (including redirects).
@@ -1926,7 +1995,7 @@ fn emit_pipeline_stmt(ctx: &CodegenCtx, scope: &mut Scope, pipeline: &PipelineSt
     let errexit_stmt = if scope.unguarded {
         quote! {}
     } else {
-        quote! { __shell.check_errexit(); }
+        quote! { __shell.check_errexit()?; }
     };
 
     if !pipeline_calls_defined_fn(&ctx.functions, pipeline) {
