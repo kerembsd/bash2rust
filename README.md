@@ -19,7 +19,15 @@ The workspace is organized into eight crates:
 | `bash2rust-ai` | Optional LLM fallback providers (Ollama, Anthropic, OpenAI-compatible) for unsupported nodes |
 | `bash2rust-cli` | `bash2rust` CLI binary (`--emit`, `--migrate`, `--ai`) |
 
-## Quickstart
+## Installation & Quickstart
+
+Install the `bash2rust` CLI directly from GitHub or from a local checkout:
+
+```bash
+cargo install --git https://github.com/kerembsd/bash2rust
+# or from a local clone:
+cargo install --path crates/bash2rust-cli
+```
 
 Build the workspace:
 
@@ -33,10 +41,14 @@ Transpile a Bash script to Rust on stdout:
 cargo run -p bash2rust-cli -- --file tests/fixtures/01_variables_basic.sh --emit rust
 ```
 
-Migrate a Bash script into a standalone Cargo project:
+Migrate a Bash script into a self-contained Cargo project (`--standalone` is the default, embedding `src/runtime.rs` with zero path or git dependency on `bash2rust`):
 
 ```bash
-cargo run -p bash2rust-cli -- --file path/to/script.sh --migrate ./output-crate
+bash2rust --file path/to/script.sh --migrate ./output-crate
+# or explicitly:
+bash2rust --file path/to/script.sh --migrate ./output-crate --standalone
+# or link against a local bash2rust-runtime checkout instead:
+bash2rust --file path/to/script.sh --migrate ./output-crate --runtime-path ./crates/bash2rust-runtime
 ```
 
 Run the workspace test suite:
@@ -49,16 +61,16 @@ cargo test --workspace
 
 | Category | Supported Features |
 | :--- | :--- |
-| Variables & Arrays | Scalar/array assignments, `local`/`export`/`readonly`, `declare -a`, `+=`, `${#arr[@]}` |
+| Variables & Arrays | Scalar/array assignments, `local`/`export`/`readonly`, `declare -a`, `declare -n`/`local -n` namerefs, `${!var}` indirect expansion, `+=`, `${#arr[@]}` |
 | Quoting & Expansion | Single/double quotes, `$'...'` ANSI-C escapes, word splitting (`IFS`), globbing (`*`, `?`, `[...]`) |
 | Strict Mode | `set -euo pipefail`, `nounset` diagnostics, dynamic `errexit` suppression in unguarded conditions |
 | Arithmetic & Loops | `$((...))`, `((...))`, `ARRAY[i]` indexing, C-style `for ((...))`, `for`/`while`/`until` |
 | Parameter Expansion | `${var:-def}`, `${var-def}`, `${#var}`, `${var#pat}`, `${var%pat}`, `${var/pat/rep}`, slicing |
-| Control Flow & Functions | `if`/`elif`/`else`, `case ... esac`, functions, `local` hoisting, `shift`, `return`, dynamic `"$@"` dispatch |
+| Control Flow & Functions | `if`/`elif`/`else`, `case ... esac`, functions, `local` hoisting, `shift`, `return`, `source`/`.` (static inlining + dynamic fallback), dynamic `"$@"` dispatch |
 | I/O, Pipelines & Subshells | Multi-stage pipelines, `>`, `>>`, `<`, `2>&1`, heredocs (`<<`, `<<-`), `<<<`, `<(...)`, subshell `( ... )` cwd isolation |
-| Signals & Tests | `trap` (`EXIT`, `INT`, `TERM`, `ERR`, `trap - ...`), `[ ... ]`, `[[ ... ]]` with `=~` regex matching |
+| Signals, Tests & Diagnostics | `trap` (`EXIT`, `INT`, `TERM`, `ERR`, `trap - ...`), `[ ... ]`, `[[ ... ]]` with `=~` regex matching, `miette` source-span diagnostics |
 
-On the 42-script differential corpus (`tests/compatibility/`), deterministic mode achieves **40/42 (95.2%)** parity with system `bash` (**0** compile failures, **0** unsupported scripts, and **2** remaining subshell variable-isolation / exit-code mismatches). See [docs/COMPATIBILITY_REPORT.md](docs/COMPATIBILITY_REPORT.md) for the full per-script breakdown.
+On the 46-script differential corpus (`tests/compatibility/`), deterministic mode achieves **45/45 (100.0%)** active parity with system `bash` on host Bash 3.2 (with `46_nameref_declare_n.sh` gated on Bash >= 4.3; **0** compile failures, **0** semantic mismatches, and **0** unsupported scripts). Newly supported features include `source`/`.`, `${!var}`, `declare -n`/`local -n`, dynamic function dispatch, and `miette` source-span diagnostics. See [docs/COMPATIBILITY_REPORT.md](docs/COMPATIBILITY_REPORT.md) for the full per-script breakdown.
 
 Any construct outside deterministic lowering emits `Stmt::Unsupported` and can optionally be translated via `--ai ollama|anthropic|openai` (`bash2rust-ai`). For a full-scale transpilation example, see [kerembsd/archinstall-tui-rs](https://github.com/kerembsd/archinstall-tui-rs).
 
@@ -66,7 +78,7 @@ Any construct outside deterministic lowering emits `Stmt::Unsupported` and can o
 
 - `crates/` — Compiler, runtime, verification, AI fallback, and CLI workspace crates
 - `tests/fixtures/` — Unit-level Bash fixtures for parser and codegen tests
-- `tests/compatibility/` — 42 differential compatibility scripts (`bash` vs. `bash2rust`)
+- `tests/compatibility/` — 46 differential compatibility scripts (`bash` vs. `bash2rust`)
 - `docs/` — Generated compatibility report (`docs/COMPATIBILITY_REPORT.md`)
 
 ## License
