@@ -1710,19 +1710,7 @@ fn lower_simple_command(simple: &ast::SimpleCommand) -> Stmt {
         }
     }
 
-    // Complex shell builtins (`eval`) fall back to `Stmt::Unsupported` for hybrid AI translation.
     if let Some(cmd_word) = &simple.word_or_name {
-        if cmd_word.value == "eval" {
-            let mut parts = vec![cmd_word.value.clone()];
-            for w in &raw_arg_words {
-                parts.push(w.value.clone());
-            }
-            return Stmt::Unsupported {
-                construct: cmd_word.value.clone(),
-                raw: parts.join(" "),
-                span: cmd_word.loc.as_ref().map(lower_span),
-            };
-        }
         if cmd_word.value == "return" && redirects.is_empty() && env_assignments.is_empty() {
             return Stmt::Return {
                 code: args.into_iter().next(),

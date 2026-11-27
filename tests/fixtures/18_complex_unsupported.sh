@@ -3,6 +3,6 @@ set -euo pipefail
 
 app_name="bash2rust-hybrid"
 trap 'echo "cleanup complete"' EXIT
-eval 'status="dynamic_ok"'
-eval 'second="also_unsupported"'
+coproc { echo "dynamic_ok"; }
+coproc { echo "also_unsupported"; }
 echo "${app_name}: done"

@@ -236,8 +236,8 @@ fn harness_isolates_working_directories_and_detects_unsupported_constructs() {
         "expected subshell unsupported entry, got {unsupported:?}"
     );
     assert!(
-        unsupported.iter().any(|u| u.contains("eval")),
-        "expected eval unsupported entry, got {unsupported:?}"
+        !unsupported.iter().any(|u| u.contains("eval")),
+        "eval should lower natively, got {unsupported:?}"
     );
 
     let _ = run_compat_case(&script, Duration::from_secs(5)).expect("run isolated case");

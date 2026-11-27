@@ -340,7 +340,7 @@ fn fixture_17_redirections() {
 }
 
 #[test]
-fn eval_lowers_to_unsupported_and_trap_lowers_natively() {
+fn eval_and_trap_lower_natively() {
     let ir = parse_str_to_ir(
         "eval \"echo hi\"\ntrap \"rm -f /tmp/x\" EXIT\n",
         "builtins.sh",
@@ -349,7 +349,7 @@ fn eval_lowers_to_unsupported_and_trap_lowers_natively() {
     assert_eq!(ir.statements.len(), 2);
     assert!(matches!(
         &ir.statements[0],
-        Stmt::Unsupported { construct, raw, .. } if construct == "eval" && raw.contains("eval")
+        Stmt::Command(cmd) if cmd.name.as_ref().is_some_and(|w| w.raw == "eval")
     ));
     assert!(matches!(
         &ir.statements[1],
@@ -364,10 +364,17 @@ fn fixture_18_complex_unsupported() {
         s,
         Stmt::Command(cmd) if cmd.name.as_ref().is_some_and(|w| w.raw == "trap")
     )));
-    assert!(ir.statements.iter().any(|s| matches!(
-        s,
-        Stmt::Unsupported { construct, raw, .. } if construct == "eval" && raw.contains("dynamic_ok")
-    )));
+    let unsupported_count = ir
+        .statements
+        .iter()
+        .filter(|s| {
+            matches!(
+                s,
+                Stmt::Unsupported { construct, .. } if construct == "compound_command"
+            )
+        })
+        .count();
+    assert_eq!(unsupported_count, 2);
 }
 
 #[test]

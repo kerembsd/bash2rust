@@ -188,11 +188,11 @@ The workspace is organized into eight crates:
 | Strict Mode | `set -euo pipefail`, `set -f`/`+f`, `shopt` (`checkwinsize`, `extdebug`), `nounset` diagnostics, dynamic `errexit` suppression in unguarded conditions |
 | Arithmetic & Loops | `$((...))`, `((...))`, `base#num` (`16#ff`), `?:` ternary, `ARRAY[i]` indexing, C-style `for ((...))`, `for`/`while`/`until` |
 | Parameter Expansion | `${var:-def}`, `${var:=def}`, `${var:+alt}`, `${#var}`, `${var#pat}`, `${var%pat}`, `${var/pat/rep}`, `${var^/^^/,/,,/~/~~}` case modification, slicing, `$_` |
-| Control Flow & Functions | `if`/`elif`/`else`, `case ... esac`, functions, `declare -F`, `FUNCNAME`, `local` hoisting, `shift`, `return`, `source`/`.` (static inlining + dynamic fallback), dynamic `"$@"` dispatch |
+| Control Flow & Functions | `if`/`elif`/`else`, `case ... esac`, functions, `declare -F`, `FUNCNAME`, `local` hoisting, `shift`, `return`, `eval`, `source`/`.` (static inlining + dynamic fallback), dynamic `"$@"` dispatch |
 | I/O, Pipelines & Subshells | Multi-stage pipelines, `>`, `>>`, `<`, `2>&1`, bare `>file`, `$(<file)`, heredocs (`<<`, `<<-`), `<<<`, `<(...)`, `<> <(...)`, `printf` (`-v`, `%(fmt)T`), `read` (`-t`, `-d`), subshell `( ... )` cwd isolation |
 | Signals, Tests & Diagnostics | `trap` (`EXIT`, `INT`, `TERM`, `ERR`, `trap - ...`), `[ ... ]`, `[[ ... ]]` with `=~` regex matching (`BASH_REMATCH`), `miette` source-span diagnostics |
 
-On the 54-script differential corpus (`tests/compatibility/`), deterministic mode achieves **54/54 (100.0%)** parity with GNU Bash 5.3 (**0** compile failures, **0** semantic mismatches, and **1** script with an `eval` unsupported construct; scripts with `# requires-bash: 4.0`/`4.2`/`4.3` are automatically gated when running on older host shells such as macOS Bash 3.2). See [docs/COMPATIBILITY_REPORT.md](docs/COMPATIBILITY_REPORT.md) for the full per-script breakdown.
+On the 54-script differential corpus (`tests/compatibility/`), deterministic mode achieves **54/54 (100.0%)** parity with GNU Bash 5.3 (**0** compile failures, **0** semantic mismatches, and **0** unsupported constructs; scripts with `# requires-bash: 4.0`/`4.2`/`4.3` are automatically gated when running on older host shells such as macOS Bash 3.2). See [docs/COMPATIBILITY_REPORT.md](docs/COMPATIBILITY_REPORT.md) for the full per-script breakdown.
 
 ---
 

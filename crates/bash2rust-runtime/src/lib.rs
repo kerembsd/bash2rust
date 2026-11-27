@@ -1524,6 +1524,19 @@ impl ShellState {
                 self.emit_builtin_output("", redirects)?;
                 Ok(Some(0))
             }
+            "eval" => {
+                let src = args.join(" ");
+                if redirects.is_empty() {
+                    let rc = self.eval_bash_str(&src)?;
+                    return Ok(Some(rc));
+                }
+                self.push_stdout_capture();
+                let res = self.eval_bash_str(&src);
+                let captured = self.pop_stdout_capture_raw();
+                let rc = res?;
+                self.apply_captured_redirects(&captured, redirects)?;
+                Ok(Some(rc))
+            }
             "source" | "." => {
                 let Some(path) = args.first().copied() else {
                     self.emit_builtin_stderr(

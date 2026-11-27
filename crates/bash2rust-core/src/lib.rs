@@ -225,13 +225,13 @@ mod tests {
     #[tokio::test]
     async fn resolves_nested_unsupported_nodes_with_ai() {
         let script = r#"
-eval "echo top"
+coproc { echo top; }
 if [ -d /tmp ]; then
-    eval "echo inner"
+    coproc { echo inner; }
 fi
 for x in a b; do
     case "$x" in
-        a) eval "echo a" ;;
+        a) coproc { echo nested; } ;;
     esac
 done
 "#;

@@ -836,41 +836,6 @@ fn emit_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStream {
         Stmt::AndOr(and_or) => emit_and_or_stmt(ctx, scope, and_or),
         Stmt::Pipeline(pipeline) => emit_pipeline_stmt(ctx, scope, pipeline),
         Stmt::Unsupported { construct, raw, .. } => {
-            if construct == "eval" {
-                let arg = raw.strip_prefix("eval").unwrap_or("").trim();
-                let unq = arg
-                    .strip_prefix('"')
-                    .and_then(|s| s.strip_suffix('"'))
-                    .unwrap_or(arg);
-                if let Some(var_name) = unq
-                    .strip_prefix("${")
-                    .and_then(|s| s.strip_suffix('}'))
-                    .or_else(|| unq.strip_prefix('$'))
-                {
-                    if let Some(binding) = scope.get(var_name) {
-                        let ident = &binding.ident;
-                        return quote! {
-                            {
-                                let __eval_src = if !#ident.is_empty() {
-                                    #ident.clone()
-                                } else {
-                                    __shell.get_var(#var_name).unwrap_or("").to_owned()
-                                };
-                                let _ = __shell.eval_bash_str(&__eval_src)?;
-                            }
-                        };
-                    }
-                    return quote! {
-                        {
-                            let __eval_src = __shell.get_var(#var_name).unwrap_or("").to_owned();
-                            let _ = __shell.eval_bash_str(&__eval_src)?;
-                        }
-                    };
-                }
-                return quote! {
-                    let _ = __shell.eval_bash_str(#unq)?;
-                };
-            }
             quote! {
                 let _ = (#construct, #raw);
             }
@@ -1968,6 +1933,90 @@ fn emit_command_call(ctx: &CodegenCtx, scope: &mut Scope, cmd: &CommandCall) -> 
             }
         };
     };
+
+    // Shell `eval` builtin: sync in-scope bindings, evaluate joined args, and sync back.
+    if name_word.raw == "eval" {
+        let (args_setup, args_slice) = emit_command_args_setup(scope, &cmd.args);
+        let pre_sync: Vec<TokenStream> = scope
+            .vars
+            .iter()
+            .filter_map(|(bash_name, binding)| {
+                if binding.readonly {
+                    return None;
+                }
+                let ident = &binding.ident;
+                match binding.ty {
+                    VarType::OwnedString => Some(quote! {
+                        __shell.set_var(#bash_name, #ident.clone());
+                    }),
+                    VarType::OwnedArray => Some(quote! {
+                        __shell.set_array(#bash_name, #ident.clone());
+                    }),
+                    VarType::StrSlice => None,
+                }
+            })
+            .collect();
+        let post_sync: Vec<TokenStream> = scope
+            .vars
+            .iter()
+            .filter_map(|(bash_name, binding)| {
+                if binding.readonly {
+                    return None;
+                }
+                let ident = &binding.ident;
+                match binding.ty {
+                    VarType::OwnedString => Some(quote! {
+                        if let Some(__v) = __shell.get_var(#bash_name) {
+                            #ident = __v.to_owned();
+                        }
+                    }),
+                    VarType::OwnedArray => Some(quote! {
+                        let __arr = __shell.get_array(#bash_name);
+                        if !__arr.is_empty() {
+                            #ident = __arr.to_vec();
+                        }
+                    }),
+                    VarType::StrSlice => None,
+                }
+            })
+            .collect();
+        let errexit_stmt = if scope.unguarded {
+            quote! {}
+        } else {
+            quote! { __shell.check_errexit()?; }
+        };
+        if cmd.redirects.is_empty() {
+            return quote! {
+                {
+                    #(#env_stmts)*
+                    #args_setup
+                    let __eval_src = (#args_slice).join(" ");
+                    #(#pre_sync)*
+                    let _ = __shell.eval_bash_str(&__eval_src)?;
+                    #(#post_sync)*
+                    #errexit_stmt
+                }
+            };
+        }
+        let (redir_bindings, redir_specs) =
+            emit_redirect_specs_with_bindings(scope, &cmd.redirects);
+        return quote! {
+            {
+                #(#env_stmts)*
+                #args_setup
+                let __eval_src = (#args_slice).join(" ");
+                #(#pre_sync)*
+                #(#redir_bindings)*
+                __shell.push_stdout_capture();
+                let __eval_res = __shell.eval_bash_str(&__eval_src);
+                let __eval_captured = __shell.pop_stdout_capture_raw();
+                let _ = __eval_res?;
+                __shell.apply_captured_redirects(&__eval_captured, &[#(#redir_specs),*])?;
+                #(#post_sync)*
+                #errexit_stmt
+            }
+        };
+    }
 
     // Shell `set` builtin (e.g. `set -euo pipefail`, `set -f`, `set -- $*`).
     if name_word.raw == "set" && cmd.redirects.is_empty() {

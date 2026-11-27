@@ -14,7 +14,7 @@
 - **Compilation Failures:** 0
 - **Semantic Mismatches:** 0
 - **Timeouts:** 0
-- **Scripts with Unsupported Syntax:** 1
+- **Scripts with Unsupported Syntax:** 0
 
 | Category | Total | Passed | Failed | Pass Rate |
 | :--- | :---: | :---: | :---: | :---: |
@@ -100,7 +100,7 @@
 - `48_arrays_mapfile_assoc.sh` — **PASS** (unsupported: none)
 - `49_printf_strftime_and_read.sh` — **PASS** (unsupported: none)
 - `52_proc_subst_and_redirects.sh` — **PASS** (unsupported: none)
-- `53_eval_and_dynamic_fn.sh` — **PASS** (unsupported: eval: `eval "$dynamic_block"`)
+- `53_eval_and_dynamic_fn.sh` — **PASS** (unsupported: none)
 
 ### Case & Parameter Expansion
 

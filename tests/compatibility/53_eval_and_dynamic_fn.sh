@@ -30,3 +30,8 @@ EOF
 
 eval "$dynamic_block"
 eval_entry "ok"
+
+# eval mutating an in-scope variable
+x=1
+eval 'x=2'
+echo "eval_var:$x"
