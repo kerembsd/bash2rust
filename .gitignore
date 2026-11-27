@@ -1,0 +1,8 @@
+target/
+out_*/
+*.rs.bk
+*.log
+*.img
+.DS_Store
+.vscode/
+.idea/

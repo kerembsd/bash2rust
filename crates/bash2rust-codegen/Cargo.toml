@@ -1,0 +1,22 @@
+[package]
+name = "bash2rust-codegen"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Rust AST and formatted source code generator for bash2rust-ir"
+keywords = ["bash", "rust", "codegen", "compiler"]
+categories = ["compilers", "development-tools"]
+
+[dependencies]
+bash2rust-ir.workspace = true
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
+prettyplease.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+bash2rust-parser.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "bash2rust-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Core compilation pipeline and async AI fallback orchestration for bash2rust"
+keywords = ["bash", "rust", "compiler", "transpiler"]
+categories = ["compilers", "development-tools"]
+
+[dependencies]
+anyhow.workspace = true
+bash2rust-ai.workspace = true
+bash2rust-codegen.workspace = true
+bash2rust-ir.workspace = true
+bash2rust-parser.workspace = true
+bash2rust-runtime.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+syn.workspace = true
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }

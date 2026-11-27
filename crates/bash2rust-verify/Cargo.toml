@@ -1,0 +1,26 @@
+[package]
+name = "bash2rust-verify"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Differential verification engine and AI self-healing compiler loop for bash2rust"
+keywords = ["bash", "rust", "verification", "differential-testing"]
+categories = ["compilers", "development-tools::testing"]
+
+[dependencies]
+anyhow.workspace = true
+bash2rust-ai.workspace = true
+bash2rust-core.workspace = true
+bash2rust-ir.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
+
+[[test]]
+name = "bash_semantics_test"
+path = "../../tests/bash_semantics_test.rs"

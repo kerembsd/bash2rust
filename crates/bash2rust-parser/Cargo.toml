@@ -1,0 +1,19 @@
+[package]
+name = "bash2rust-parser"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Brush-parser integration and AST-to-IR lowering for bash2rust"
+keywords = ["bash", "parser", "ast", "compiler"]
+categories = ["compilers", "parsing"]
+
+[dependencies]
+bash2rust-ir.workspace = true
+brush-parser.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

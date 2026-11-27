@@ -1,0 +1,16 @@
+[package]
+name = "bash2rust-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Synchronous POSIX/Bash runtime helpers for bash2rust-generated binaries"
+keywords = ["bash", "runtime", "process", "shell"]
+categories = ["os", "command-line-utilities"]
+
+[dependencies]
+thiserror.workspace = true
+regex.workspace = true
+libc.workspace = true

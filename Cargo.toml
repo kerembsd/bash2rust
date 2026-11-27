@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bash2rust-core",
+    "crates/bash2rust-parser",
+    "crates/bash2rust-ir",
+    "crates/bash2rust-codegen",
+    "crates/bash2rust-runtime",
+    "crates/bash2rust-verify",
+    "crates/bash2rust-ai",
+    "crates/bash2rust-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["bash2rust Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kerembsd/bash2rust"
+rust-version = "1.88.0"
+
+[workspace.dependencies]
+bash2rust-ir = { path = "crates/bash2rust-ir" }
+bash2rust-parser = { path = "crates/bash2rust-parser" }
+bash2rust-codegen = { path = "crates/bash2rust-codegen" }
+bash2rust-runtime = { path = "crates/bash2rust-runtime" }
+bash2rust-verify = { path = "crates/bash2rust-verify" }
+bash2rust-ai = { path = "crates/bash2rust-ai" }
+bash2rust-core = { path = "crates/bash2rust-core" }
+
+brush-parser = "0.4.0"
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "visit"] }
+proc-macro2 = "1.0"
+prettyplease = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+async-trait = "0.1"
+regex = "1"
+libc = "0.2"
