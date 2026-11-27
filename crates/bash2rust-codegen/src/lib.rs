@@ -196,6 +196,9 @@ fn collect_functions_in_stmt(
         Stmt::Block(b) => {
             collect_functions_in_stmts(&b.statements, functions, all_functions, used);
         }
+        Stmt::Source { body: Some(b), .. } => {
+            collect_functions_in_stmts(&b.statements, functions, all_functions, used);
+        }
         Stmt::AndOr(ao) => {
             collect_functions_in_stmt(&ao.first, functions, all_functions, used);
             for r in &ao.rest {
@@ -276,6 +279,8 @@ fn validate_raw_rust_in_stmt(stmt: &Stmt) -> Result<(), CodegenError> {
         }
         Stmt::Function(f) => validate_raw_rust_in_block(&f.body),
         Stmt::Block(b) => validate_raw_rust_in_block(b),
+        Stmt::Source { body: Some(b), .. } => validate_raw_rust_in_block(b),
+        Stmt::Source { body: None, .. } => Ok(()),
         Stmt::Case(c) => {
             for item in &c.items {
                 validate_raw_rust_in_block(&item.body)?;
@@ -367,7 +372,13 @@ pub fn emit_program_tokens(program: &IrProgram) -> Result<TokenStream, CodegenEr
         ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
             match prog {
                 #(#dynamic_arms)*
-                _ => Ok(None),
+                _ => {
+                    if let Some(__res) = __shell.call_sourced_fn(prog, args) {
+                        Ok(Some(__res?))
+                    } else {
+                        Ok(None)
+                    }
+                }
             }
         }
 
@@ -434,6 +445,92 @@ fn emit_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStream {
         Stmt::Loop(loop_stmt) => emit_loop_stmt_with(ctx, scope, loop_stmt),
         Stmt::Function(_) => quote! {},
         Stmt::Return { code, .. } => emit_return_stmt(scope, code.as_ref()),
+        Stmt::Source {
+            path, args, body, ..
+        } => {
+            if let Some(inc_block) = body {
+                let mut hoisted_assigns = Vec::new();
+                if !scope.in_function {
+                    collect_block_assigns(inc_block, &mut hoisted_assigns);
+                }
+                let mut hoisted = Vec::new();
+                for (name, is_array) in hoisted_assigns {
+                    if scope.get(&name).is_none() {
+                        if is_array {
+                            let ident = scope.declare(&name, VarType::OwnedArray);
+                            hoisted.push(quote! {
+                                let mut #ident: Vec<String> = Vec::new();
+                            });
+                        } else {
+                            let ident = scope.declare(&name, VarType::OwnedString);
+                            hoisted.push(quote! {
+                                let mut #ident = String::new();
+                            });
+                        }
+                    }
+                }
+                let inner = emit_block_with(ctx, scope, inc_block);
+                let errexit_stmt = if scope.unguarded {
+                    quote! {}
+                } else {
+                    quote! { __shell.check_errexit()?; }
+                };
+                if args.is_empty() {
+                    quote! {
+                        #(#hoisted)*
+                        {
+                            let __src_res = (|| -> Result<(), Box<dyn std::error::Error>> {
+                                #inner
+                                Ok(())
+                            })();
+                            __src_res?;
+                            #errexit_stmt
+                        }
+                    }
+                } else {
+                    let (args_setup, args_slice) = emit_command_args_setup(scope, args);
+                    quote! {
+                        #(#hoisted)*
+                        {
+                            #args_setup
+                            let __saved_pos = __shell.positional_args.clone();
+                            let __saved_local_args = args;
+                            let mut args: Vec<&str> = (#args_slice).to_vec();
+                            let _ = &args;
+                            __shell.set_positional_args(&args);
+                            let __src_res = (|| -> Result<(), Box<dyn std::error::Error>> {
+                                #inner
+                                Ok(())
+                            })();
+                            args = __saved_local_args;
+                            let _ = &args;
+                            __shell.set_positional_args(&args);
+                            __shell.positional_args = __saved_pos;
+                            __src_res?;
+                            #errexit_stmt
+                        }
+                    }
+                }
+            } else {
+                let path_expr = emit_word_string_expr(scope, path);
+                let (args_setup, args_slice) = emit_command_args_setup(scope, args);
+                let post_sync = emit_post_call_sync(scope);
+                let errexit_stmt = if scope.unguarded {
+                    quote! {}
+                } else {
+                    quote! { __shell.check_errexit()?; }
+                };
+                quote! {
+                    {
+                        let __src_path = #path_expr;
+                        #args_setup
+                        let _ = __shell.source_file(&__src_path, #args_slice)?;
+                        #post_sync
+                        #errexit_stmt
+                    }
+                }
+            }
+        }
         Stmt::Block(block) => {
             if block.is_subshell {
                 let mut sub_scope = scope.clone();
@@ -675,18 +772,37 @@ fn assign_has_command_subst(val: &AssignValue) -> bool {
 
 fn emit_assignment_with(scope: &mut Scope, assign: &Assignment) -> TokenStream {
     let body = emit_assignment_with_inner(scope, assign);
+    let nameref_sync = if !scope.in_function {
+        let post_sync = emit_post_call_sync(scope);
+        if post_sync.is_empty() {
+            quote! {}
+        } else {
+            quote! {
+                if __shell.has_namerefs() {
+                    #post_sync
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
     if assign_has_command_subst(&assign.value) {
         if scope.unguarded {
-            body
+            quote! {
+                #body
+                #nameref_sync
+            }
         } else {
             quote! {
                 #body
+                #nameref_sync
                 __shell.check_errexit()?;
             }
         }
     } else {
         quote! {
             #body
+            #nameref_sync
             __shell.set_status(0);
         }
     }
@@ -1641,7 +1757,8 @@ fn emit_command_call(ctx: &CodegenCtx, scope: &mut Scope, cmd: &CommandCall) -> 
         )
     };
 
-    let is_dynamic_all_args = is_quoted_all_args(effective_name);
+    let is_dynamic_cmd =
+        is_quoted_all_args(effective_name) || word_has_dynamic_parts(effective_name);
     let shell_arg = if scope.in_function {
         quote! { __shell }
     } else {
@@ -1650,7 +1767,7 @@ fn emit_command_call(ctx: &CodegenCtx, scope: &mut Scope, cmd: &CommandCall) -> 
     let post_sync = emit_post_call_sync(scope);
 
     let call = if cmd.redirects.is_empty() {
-        let dyn_dispatch = if is_dynamic_all_args && !bypass_fns {
+        let dyn_dispatch = if is_dynamic_cmd && !bypass_fns {
             quote! {
                 if __dispatch_dynamic_fn(#shell_arg, #prog_ref, #args_slice)?.is_some() {
                     #post_sync
@@ -1895,7 +2012,8 @@ fn emit_bool_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStre
                     .map(|a| emit_cmd_env_assignment(scope, a))
                     .collect();
 
-                let is_dynamic_all_args = is_quoted_all_args(effective_name);
+                let is_dynamic_cmd =
+                    is_quoted_all_args(effective_name) || word_has_dynamic_parts(effective_name);
                 let shell_arg = if scope.in_function {
                     quote! { __shell }
                 } else {
@@ -1904,7 +2022,7 @@ fn emit_bool_stmt(ctx: &CodegenCtx, scope: &mut Scope, stmt: &Stmt) -> TokenStre
                 let post_sync = emit_post_call_sync(scope);
 
                 let inner_bool = if cmd.redirects.is_empty() {
-                    if is_dynamic_all_args && !bypass_fns {
+                    if is_dynamic_cmd && !bypass_fns {
                         quote! {
                             {
                                 #prog_setup
@@ -2539,6 +2657,28 @@ fn emit_command_subst_expr(scope: &Scope, stmt: &Stmt, fallback_raw: &str) -> To
                 }
                 let prog_string = emit_word_string_expr(scope, name_word);
                 let (args_setup, args_slice) = emit_command_args_setup(scope, &cmd.args);
+                if word_has_dynamic_parts(name_word) {
+                    let shell_arg = if scope.in_function {
+                        quote! { __shell }
+                    } else {
+                        quote! { &mut __shell }
+                    };
+                    let post_sync = emit_post_call_sync(scope);
+                    return quote! {
+                        {
+                            let __prog = #prog_string;
+                            #args_setup
+                            __shell.push_stdout_capture();
+                            if __dispatch_dynamic_fn(#shell_arg, &__prog, #args_slice)?.is_some() {
+                                #post_sync
+                                __shell.pop_stdout_capture()
+                            } else {
+                                let _ = __shell.pop_stdout_capture_raw();
+                                __shell.command_subst_with_redirects(&__prog, #args_slice, &[])?
+                            }
+                        }
+                    };
+                }
                 return quote! {
                     {
                         let __prog = #prog_string;
@@ -2688,6 +2828,25 @@ fn emit_param_expansion_expr(
     line: usize,
 ) -> TokenStream {
     match op {
+        ParamExpansionOp::Indirect => {
+            let source_name = &scope.source_name;
+            if let Some(binding) = scope.get(name) {
+                let ident = &binding.ident;
+                match binding.ty {
+                    VarType::OwnedString => quote! {
+                        __shell.get_var_or_env_checked(#ident.as_str(), #source_name, #line)
+                    },
+                    VarType::StrSlice => quote! {
+                        __shell.get_var_or_env_checked(#ident, #source_name, #line)
+                    },
+                    VarType::OwnedArray => quote! {
+                        __shell.get_indirect_checked(#name, #source_name, #line)
+                    },
+                }
+            } else {
+                quote! { __shell.get_indirect_checked(#name, #source_name, #line) }
+            }
+        }
         ParamExpansionOp::Length => {
             if let Some(arr_name) = name
                 .strip_suffix("[@]")
@@ -2827,6 +2986,26 @@ fn emit_param_expansion_expr(
         }
         ParamExpansionOp::UseDefault { default, colon } => {
             let def_expr = emit_word_string_expr(scope, default);
+            if let Ok(pos_idx) = name.parse::<usize>() {
+                if pos_idx >= 1 {
+                    let zero_idx = pos_idx - 1;
+                    return if *colon {
+                        quote! {
+                            match args.get(#zero_idx).copied() {
+                                Some(__v) if !__v.is_empty() => __v.to_owned(),
+                                _ => #def_expr,
+                            }
+                        }
+                    } else {
+                        quote! {
+                            match args.get(#zero_idx).copied() {
+                                Some(__v) => __v.to_owned(),
+                                None => #def_expr,
+                            }
+                        }
+                    };
+                }
+            }
             if let Some(binding) = scope.get(name) {
                 let ident = &binding.ident;
                 let val_expr = match binding.ty {
@@ -2916,6 +3095,14 @@ fn is_quoted_all_args(word: &Word) -> bool {
         || (word.has_quotes
             && word.parts.len() == 1
             && matches!(&word.parts[0], WordPart::VarRef(name) if name == "@"))
+}
+
+fn word_has_dynamic_parts(word: &Word) -> bool {
+    !word.parts.is_empty()
+        && word
+            .parts
+            .iter()
+            .any(|p| !matches!(p, WordPart::Literal(_)))
 }
 
 fn array_expansion_part(word: &Word) -> Option<(&str, &ParamExpansionOp)> {

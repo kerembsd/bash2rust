@@ -365,6 +365,7 @@ fn collect_from_word(word: &Word, out: &mut Vec<String>) {
             | WordPart::ParamExpansion {
                 op:
                     ParamExpansionOp::Length
+                    | ParamExpansionOp::Indirect
                     | ParamExpansionOp::ArrayAll
                     | ParamExpansionOp::ArrayAllIfSet,
                 ..
@@ -445,6 +446,17 @@ fn collect_from_stmt(stmt: &Stmt, out: &mut Vec<String>) {
         }
         Stmt::Function(f) => collect_from_block(&f.body, out),
         Stmt::Block(b) => collect_from_block(b, out),
+        Stmt::Source {
+            path, args, body, ..
+        } => {
+            collect_from_word(path, out);
+            for arg in args {
+                collect_from_word(arg, out);
+            }
+            if let Some(b) = body {
+                collect_from_block(b, out);
+            }
+        }
         Stmt::Command(c) => {
             if let Some(name) = &c.name {
                 collect_from_word(name, out);

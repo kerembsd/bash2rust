@@ -7,9 +7,9 @@
 
 ## Deterministic Mode
 
-- **Total tests:** 42
-- **Passed:** 42 (100.0%)
-- **Skipped:** 0
+- **Total tests:** 46
+- **Passed:** 45 (97.8%)
+- **Skipped:** 1
 - **Failed:** 0
 - **Compilation Failures:** 0
 - **Semantic Mismatches:** 0
@@ -25,11 +25,11 @@
 | Subshells (`14_subshell_var_isolation.sh`, `15_subshell_cwd_isolation.sh`, `16_subshell_exit_code.sh`) | 3 | 3 | 0 | 100.0% |
 | Pipelines (`17_pipeline_multistage.sh`, `18_pipeline_exit_code_default.sh`, `19_pipeline_negation.sh`) | 3 | 3 | 0 | 100.0% |
 | Command Substitution (`20_cmdsubst_trailing_newlines.sh`, `21_cmdsubst_nested_quoted.sh`, `22_cmdsubst_exit_status.sh`) | 3 | 3 | 0 | 100.0% |
-| Redirections & Stderr (`23_redir_truncate_append_input.sh`, `24_redir_stderr_separation.sh`, `25_redir_stderr_to_stdout.sh`, `36_heredoc_herestring_procsubst.sh`, `37_command_v_path_and_negation.sh`) | 5 | 5 | 0 | 100.0% |
+| Redirections & Stderr (`23_redir_truncate_append_input.sh`, `24_redir_stderr_separation.sh`, `25_redir_stderr_to_stdout.sh`, `36_heredoc_herestring_procsubst.sh`, `37_command_v_path_and_negation.sh`, `43_source_static_and_dynamic.sh`, `44_indirect_expansion.sh`, `46_nameref_declare_n.sh`) | 8 | 7 | 0 | 87.5% |
 | Case & Parameter Expansion (`26_case_statement.sh`, `27_parameter_expansion.sh`, `40_nested_param_exp_and_compound_subst.sh`) | 3 | 3 | 0 | 100.0% |
 | Arithmetic & C-Style Loops (`28_arithmetic_and_c_for.sh`, `38_dash_array_arith_pct.sh`) | 2 | 2 | 0 | 100.0% |
 | Extended Tests (`29_extended_test_regex.sh`) | 1 | 1 | 0 | 100.0% |
-| Function Scoping (`30_function_scoping.sh`, `31_function_calls_and_return.sh`, `32_function_command_subst.sh`, `34_shift_and_fn_dispatch.sh`) | 4 | 4 | 0 | 100.0% |
+| Function Scoping (`30_function_scoping.sh`, `31_function_calls_and_return.sh`, `32_function_command_subst.sh`, `34_shift_and_fn_dispatch.sh`, `45_dynamic_fn_dispatch.sh`) | 5 | 5 | 0 | 100.0% |
 
 ## AI-Assisted Mode
 
@@ -93,6 +93,9 @@
 - `25_redir_stderr_to_stdout.sh` — **PASS** (unsupported: none)
 - `36_heredoc_herestring_procsubst.sh` — **PASS** (unsupported: none)
 - `37_command_v_path_and_negation.sh` — **PASS** (unsupported: none)
+- `43_source_static_and_dynamic.sh` — **PASS** (unsupported: none)
+- `44_indirect_expansion.sh` — **PASS** (unsupported: none)
+- `46_nameref_declare_n.sh` — **SKIPPED (requires bash >= 4.3, host is 3.2)** (unsupported: none)
 
 ### Case & Parameter Expansion
 
@@ -115,4 +118,5 @@
 - `31_function_calls_and_return.sh` — **PASS** (unsupported: none)
 - `32_function_command_subst.sh` — **PASS** (unsupported: none)
 - `34_shift_and_fn_dispatch.sh` — **PASS** (unsupported: none)
+- `45_dynamic_fn_dispatch.sh` — **PASS** (unsupported: none)
 

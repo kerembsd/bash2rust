@@ -356,6 +356,18 @@ fn translate_stmt_initial<'a>(
                 )
                 .await?;
             }
+            Stmt::Source { body, .. } => {
+                if let Some(block) = body {
+                    translate_block_initial(
+                        block,
+                        provider,
+                        prev_codes,
+                        translated_nodes,
+                        first_syn_err,
+                    )
+                    .await?;
+                }
+            }
             Stmt::Assign(_)
             | Stmt::Arith(_)
             | Stmt::Return { .. }
@@ -536,6 +548,11 @@ fn repair_stmt<'a>(
             }
             Stmt::Block(block) => {
                 repair_block(block, provider, prev_codes, compiler_error, idx).await?;
+            }
+            Stmt::Source { body, .. } => {
+                if let Some(block) = body {
+                    repair_block(block, provider, prev_codes, compiler_error, idx).await?;
+                }
             }
             Stmt::Assign(_)
             | Stmt::Arith(_)

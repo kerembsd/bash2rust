@@ -1,6 +1,6 @@
 # Bash Compatibility Test Corpus
 
-This directory contains **42 self-contained, deterministic Bash scripts** covering 12 core semantic categories for differential testing between system `bash` and `bash2rust`.
+This directory contains **46 self-contained, deterministic Bash scripts** covering 12 core semantic categories for differential testing between system `bash` and `bash2rust`.
 
 All scripts:
 - Start with `#!/usr/bin/env bash` and pass `bash -n`.
@@ -51,3 +51,7 @@ All scripts:
 | 40 | `40_nested_param_exp_and_compound_subst.sh` | Case & Parameter Expansion | Nested `${s#${s%%[![:space:]]*}}` trim, `${tag//\"/}`, `${hdr:2:4}`, `${arr[@]:1:2}`, `$(... \|\| echo ...)`, `{ ... } > file`, and `"$@"` fn dispatch. |
 | 41 | `41_strict_unguarded_errexit_and_while_read.sh` | set -euo pipefail | Assignment `$?=0`, `\|\| rc=$?` status preservation, dynamic `errexit` suppression in unguarded fn calls, and `while read` `stdin_override` across body commands. |
 | 42 | `42_strict_trap_exit_and_subshell_cwd.sh` | set -euo pipefail | `trap on_exit EXIT` execution on exit and `( cd / && pwd )` subshell CWD isolation. |
+| 43 | `43_source_static_and_dynamic.sh` | Redirections & Stderr | Dynamic `source`/`.` with `$@` args, function/var visibility, `return`, and circular-include guard. |
+| 44 | `44_indirect_expansion.sh` | Redirections & Stderr | Indirect `${!var}` expansion at top-level and inside functions under `set -euo pipefail`. |
+| 45 | `45_dynamic_fn_dispatch.sh` | Redirections & Stderr | Dynamic `"$fn_name"` invocation in statements, `if` conditions, `$(...)`, and external fallback. |
+| 46 | `46_nameref_declare_n.sh` | Redirections & Stderr | `declare -n`, `local -n`, and `unset -n` namerefs (`# requires-bash: 4.3`). |

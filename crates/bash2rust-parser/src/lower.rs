@@ -421,6 +421,16 @@ fn try_parse_dollar(
                     return Some(close_idx + 1);
                 }
             }
+            if let Some(target) = inner.strip_prefix('!') {
+                if is_simple_var_ref(target) {
+                    flush_literal(literal_buf, parts);
+                    parts.push(WordPart::ParamExpansion {
+                        name: target.to_owned(),
+                        op: ParamExpansionOp::Indirect,
+                    });
+                    return Some(close_idx + 1);
+                }
+            }
             if is_simple_var_ref(inner) {
                 flush_literal(literal_buf, parts);
                 parts.push(WordPart::VarRef(inner.to_owned()));
@@ -1079,6 +1089,21 @@ fn lower_simple_command(simple: &ast::SimpleCommand) -> Stmt {
                 code: args.into_iter().next(),
                 span: cmd_word.loc.as_ref().map(lower_span),
             };
+        }
+        if matches!(cmd_word.value.as_str(), "source" | ".")
+            && !args.is_empty()
+            && redirects.is_empty()
+            && env_assignments.is_empty()
+        {
+            let mut arg_iter = args.iter().cloned();
+            if let Some(path) = arg_iter.next() {
+                return Stmt::Source {
+                    path,
+                    args: arg_iter.collect(),
+                    body: None,
+                    span: cmd_word.loc.as_ref().map(lower_span),
+                };
+            }
         }
     }
 

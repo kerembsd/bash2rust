@@ -170,6 +170,11 @@ fn resolve_stmt<'a>(
             Stmt::Block(block) => {
                 resolve_block(block, provider, report).await?;
             }
+            Stmt::Source { body, .. } => {
+                if let Some(block) = body {
+                    resolve_block(block, provider, report).await?;
+                }
+            }
             Stmt::Assign(_)
             | Stmt::Arith(_)
             | Stmt::Return { .. }

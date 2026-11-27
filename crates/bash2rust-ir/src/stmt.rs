@@ -276,6 +276,13 @@ pub enum Stmt {
         code: Option<Word>,
         span: Option<SourceSpan>,
     },
+    Source {
+        path: Word,
+        args: Vec<Word>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<Block>,
+        span: Option<SourceSpan>,
+    },
     /// Fallback node for constructs not yet lowered natively (targeted for hybrid AI translation).
     Unsupported {
         construct: String,

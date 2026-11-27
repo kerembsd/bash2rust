@@ -18,6 +18,8 @@ use std::time::Instant;
 
 use thiserror::Error;
 
+mod source_interp;
+
 static SIGINT_PENDING: AtomicBool = AtomicBool::new(false);
 static SIGTERM_PENDING: AtomicBool = AtomicBool::new(false);
 
@@ -34,6 +36,13 @@ extern "C" fn handle_sigterm(_: libc::c_int) {
 /// Callback type for invoking generated shell functions by name from the runtime.
 pub type FnDispatcher =
     fn(&mut ShellState, &str, &[&str]) -> Result<Option<i32>, Box<dyn std::error::Error>>;
+
+/// Snapshot of scalar, array, and nameref variables for subshell isolation.
+pub type VarsSnapshot = (
+    HashMap<String, String>,
+    HashMap<String, Vec<String>>,
+    HashMap<String, String>,
+);
 
 /// Errors returned by `bash2rust-runtime` helpers.
 #[derive(Debug, Error)]
@@ -132,6 +141,9 @@ pub struct ShellState {
     pub ifs: Option<String>,
     pub vars: HashMap<String, String>,
     pub arrays: HashMap<String, Vec<String>>,
+    pub namerefs: HashMap<String, String>,
+    pub source_stack: Vec<std::path::PathBuf>,
+    pub sourced_functions: HashMap<String, Vec<String>>,
     pub stdout_capture_stack: Vec<Vec<u8>>,
     pub stdin_override: Option<Vec<u8>>,
     pub positional_args: Vec<String>,
@@ -160,6 +172,9 @@ impl Default for ShellState {
             ifs: None,
             vars: HashMap::new(),
             arrays: HashMap::new(),
+            namerefs: HashMap::new(),
+            source_stack: Vec::new(),
+            sourced_functions: HashMap::new(),
             stdout_capture_stack: Vec::new(),
             stdin_override: None,
             positional_args: Vec::new(),
@@ -181,15 +196,65 @@ impl ShellState {
         self.fn_dispatcher = Some(dispatcher);
     }
 
-    /// Snapshots scalar and array shell variables for subshell isolation.
-    pub fn vars_snapshot(&self) -> (HashMap<String, String>, HashMap<String, Vec<String>>) {
-        (self.vars.clone(), self.arrays.clone())
+    /// Snapshot of scalar, array, and nameref shell variables for subshell isolation.
+    pub fn vars_snapshot(&self) -> VarsSnapshot {
+        (
+            self.vars.clone(),
+            self.arrays.clone(),
+            self.namerefs.clone(),
+        )
     }
 
-    /// Restores scalar and array shell variables after a subshell finishes.
-    pub fn restore_vars(&mut self, snap: (HashMap<String, String>, HashMap<String, Vec<String>>)) {
+    /// Restores scalar, array, and nameref shell variables after a subshell finishes.
+    pub fn restore_vars(&mut self, snap: VarsSnapshot) {
         self.vars = snap.0;
         self.arrays = snap.1;
+        self.namerefs = snap.2;
+    }
+
+    /// Returns `true` if any namerefs (`declare -n` / `local -n`) are currently active.
+    pub fn has_namerefs(&self) -> bool {
+        !self.namerefs.is_empty()
+    }
+
+    /// Resolves a variable name through `namerefs`, bounded against cycles.
+    pub fn resolve_nameref<'a>(&'a self, name: &'a str) -> &'a str {
+        let mut cur = name;
+        for _ in 0..32 {
+            match self.namerefs.get(cur) {
+                Some(next) if next != cur => cur = next.as_str(),
+                _ => break,
+            }
+        }
+        cur
+    }
+
+    /// Resolves an indirect variable expansion (`${!name}`).
+    pub fn get_indirect(&self, name: &str) -> Option<String> {
+        let target = self
+            .get_var(name)
+            .map(str::to_owned)
+            .or_else(|| std::env::var(name).ok())?;
+        if target.is_empty() {
+            return None;
+        }
+        self.get_var(&target)
+            .map(str::to_owned)
+            .or_else(|| std::env::var(&target).ok())
+            .or_else(|| self.resolve_special_var(&target, 1))
+    }
+
+    /// Resolves an indirect variable expansion (`${!name}`), honoring `set -u`.
+    pub fn get_indirect_checked(&self, name: &str, source: &str, line: usize) -> String {
+        let target = self.get_var_or_env_checked(name, source, line);
+        if target.is_empty() {
+            if self.nounset {
+                eprintln!("{source}: line {line}: {name}: invalid indirect expansion");
+                std::process::exit(1);
+            }
+            return String::new();
+        }
+        self.get_var_or_env_checked(&target, source, line)
     }
 
     /// Enters a subshell scope.
@@ -249,23 +314,25 @@ impl ShellState {
 
     /// Sets a global shell variable.
     pub fn set_var(&mut self, name: &str, val: impl Into<String>) {
+        let target = self.resolve_nameref(name).to_owned();
         let val = val.into();
-        if name == "SECONDS" {
+        if target == "SECONDS" {
             self.seconds_offset = val.trim().parse::<i64>().unwrap_or(0);
             self.start_instant = Instant::now();
             return;
         }
-        if name == "RANDOM" {
+        if target == "RANDOM" {
             let seed = val.trim().parse::<u64>().unwrap_or(0);
             self.random_state.set(seed);
             return;
         }
-        self.vars.insert(name.to_owned(), val);
+        self.vars.insert(target, val);
     }
 
     /// Gets a global shell variable if set.
     pub fn get_var(&self, name: &str) -> Option<&str> {
-        self.vars.get(name).map(String::as_str)
+        let target = self.resolve_nameref(name);
+        self.vars.get(target).map(String::as_str)
     }
 
     /// Resolves Bash built-in special variables (`EUID`, `UID`, `PPID`, `HOSTNAME`, `OSTYPE`, `RANDOM`, `SECONDS`, `LINENO`).
@@ -354,49 +421,52 @@ impl ShellState {
 
     /// Reads a global shell variable or environment variable (or Bash special variable), enforcing `set -u` (`nounset`).
     pub fn get_var_or_env_checked(&self, name: &str, source: &str, line: usize) -> String {
-        if let Some(v) = self.vars.get(name) {
+        let target = self.resolve_nameref(name);
+        if let Some(v) = self.vars.get(target) {
             return v.clone();
         }
-        if let Ok(v) = std::env::var(name) {
+        if let Ok(v) = std::env::var(target) {
             return v;
         }
-        if let Some(v) = self.resolve_special_var(name, line) {
+        if let Some(v) = self.resolve_special_var(target, line) {
             return v;
         }
-        self.get_env_checked(name, source, line)
+        self.get_env_checked(target, source, line)
     }
 
     /// Appends `suffix` to a global shell variable.
     pub fn append_var(&mut self, name: &str, suffix: &str) {
-        self.vars
-            .entry(name.to_owned())
-            .or_default()
-            .push_str(suffix);
+        let target = self.resolve_nameref(name).to_owned();
+        self.vars.entry(target).or_default().push_str(suffix);
     }
 
     /// Unsets a global shell variable/array (and clears `ifs` if `name == "IFS"`).
     pub fn unset_var(&mut self, name: &str) {
-        if name == "IFS" {
+        let target = self.resolve_nameref(name).to_owned();
+        if target == "IFS" {
             self.ifs = None;
         }
-        self.vars.remove(name);
-        self.arrays.remove(name);
+        self.vars.remove(&target);
+        self.arrays.remove(&target);
     }
 
     /// Sets a global shell array.
     pub fn set_array(&mut self, name: &str, items: Vec<String>) {
-        self.arrays.insert(name.to_owned(), items);
+        let target = self.resolve_nameref(name).to_owned();
+        self.arrays.insert(target, items);
     }
 
     /// Returns a slice of a global shell array (empty slice if unset).
     pub fn get_array(&self, name: &str) -> &[String] {
-        self.arrays.get(name).map(Vec::as_slice).unwrap_or(&[])
+        let target = self.resolve_nameref(name);
+        self.arrays.get(target).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Returns an element of a global shell array (or `""` if out of bounds).
     pub fn get_array_elem(&self, name: &str, idx: usize) -> &str {
+        let target = self.resolve_nameref(name);
         self.arrays
-            .get(name)
+            .get(target)
             .and_then(|v| v.get(idx))
             .map(String::as_str)
             .unwrap_or("")
@@ -404,7 +474,8 @@ impl ShellState {
 
     /// Sets an element of a global shell array, growing with empty strings if needed.
     pub fn set_array_elem(&mut self, name: &str, idx: usize, val: impl Into<String>) {
-        let arr = self.arrays.entry(name.to_owned()).or_default();
+        let target = self.resolve_nameref(name).to_owned();
+        let arr = self.arrays.entry(target).or_default();
         if idx >= arr.len() {
             arr.resize(idx + 1, String::new());
         }
@@ -413,15 +484,14 @@ impl ShellState {
 
     /// Appends items to a global shell array.
     pub fn append_array(&mut self, name: &str, items: Vec<String>) {
-        self.arrays
-            .entry(name.to_owned())
-            .or_default()
-            .extend(items);
+        let target = self.resolve_nameref(name).to_owned();
+        self.arrays.entry(target).or_default().extend(items);
     }
 
     /// Returns the length of a global shell array.
     pub fn array_len(&self, name: &str) -> usize {
-        self.arrays.get(name).map_or(0, Vec::len)
+        let target = self.resolve_nameref(name);
+        self.arrays.get(target).map_or(0, Vec::len)
     }
 
     /// Evaluates a Bash integer arithmetic expression (`$(( ... ))`, `(( ... ))`, `for (( ... ))`).
@@ -574,6 +644,12 @@ impl ShellState {
     ) -> RuntimeResult<i32> {
         if let Some(rc) = self.try_run_builtin(program, args, env, redirects)? {
             return Ok(self.set_status(rc));
+        }
+        if redirects.is_empty() {
+            if let Some(res) = self.call_sourced_fn(program, args) {
+                let rc = res?;
+                return Ok(self.set_status(rc));
+            }
         }
 
         let mut stdin_data = self.stdin_override.take();
@@ -1087,9 +1163,18 @@ impl ShellState {
             "read" => Ok(Some(self.builtin_read(args, redirects)?)),
             "echo" => Ok(Some(self.builtin_echo(args, redirects)?)),
             "unset" => {
+                let mut unset_nameref = false;
                 for &arg in args {
+                    if arg == "-n" {
+                        unset_nameref = true;
+                        continue;
+                    }
                     if !arg.starts_with('-') {
-                        self.unset_var(arg);
+                        if unset_nameref {
+                            self.namerefs.remove(arg);
+                        } else {
+                            self.unset_var(arg);
+                        }
                     }
                 }
                 self.emit_builtin_output("", redirects)?;
@@ -1442,6 +1527,7 @@ impl ShellState {
     fn builtin_declare(&mut self, cmd: &str, args: &[&str]) {
         let mut export_var = cmd == "export";
         let mut is_array = false;
+        let mut is_nameref = false;
         for &arg in args {
             if (arg.starts_with('-') || arg.starts_with('+')) && arg.len() > 1 {
                 if arg.contains('x') && arg.starts_with('-') {
@@ -1449,6 +1535,20 @@ impl ShellState {
                 }
                 if arg.contains('a') && arg.starts_with('-') {
                     is_array = true;
+                }
+                if arg.contains('n') && arg.starts_with('-') {
+                    is_nameref = true;
+                }
+                if arg.contains('n') && arg.starts_with('+') {
+                    is_nameref = false;
+                }
+                continue;
+            }
+            if is_nameref {
+                if let Some((ref_name, target)) = arg.split_once('=') {
+                    if !target.is_empty() {
+                        self.namerefs.insert(ref_name.to_owned(), target.to_owned());
+                    }
                 }
                 continue;
             }
@@ -1474,10 +1574,11 @@ impl ShellState {
                 } else if append {
                     self.append_var(name, val);
                 } else {
-                    self.vars.insert(name.to_owned(), val.to_owned());
+                    self.set_var(name, val);
                     if export_var {
+                        let target = self.resolve_nameref(name).to_owned();
                         unsafe {
-                            std::env::set_var(name, val);
+                            std::env::set_var(target, val);
                         }
                     }
                 }
@@ -3955,5 +4056,31 @@ mod tests {
             .unwrap();
         assert_eq!(out, "stderr_msg");
         assert_eq!(sh.last_status, 3);
+    }
+
+    #[test]
+    fn source_file_circular_guard_and_nameref_declare_n() {
+        let dir = std::env::temp_dir().join(format!("bash2rust_src_cyc_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.sh");
+        let b = dir.join("b.sh");
+        std::fs::write(&a, format!("A=1\nsource {}\n", b.display())).unwrap();
+        std::fs::write(&b, format!("B=2\nsource {}\n", a.display())).unwrap();
+
+        let mut sh = ShellState::default();
+        let rc = sh.source_file(a.to_str().unwrap(), &[]).unwrap();
+        assert_eq!(rc, 1);
+        assert_eq!(sh.get_var("A"), Some("1"));
+        assert_eq!(sh.get_var("B"), Some("2"));
+        assert!(sh.source_stack.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        sh.set_var("orig", "init");
+        assert_eq!(sh.run_command("declare", &["-n", "r=orig"]).unwrap(), 0);
+        assert_eq!(sh.get_var("r"), Some("init"));
+        sh.set_var("r", "updated");
+        assert_eq!(sh.get_var("orig"), Some("updated"));
+        assert_eq!(sh.run_command("unset", &["-n", "r"]).unwrap(), 0);
+        assert_eq!(sh.get_var("orig"), Some("updated"));
     }
 }

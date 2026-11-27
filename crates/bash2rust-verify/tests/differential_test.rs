@@ -127,3 +127,27 @@ fn differential_piped_fn_with_subshell() {
     let _ = std::fs::remove_dir_all(&dir);
     res.expect("piped fn with subshell match");
 }
+
+#[test]
+fn differential_static_source_inclusion() {
+    let dir = std::env::temp_dir().join(format!("bash2rust_static_src_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let lib = dir.join("lib.sh");
+    let main = dir.join("main.sh");
+    std::fs::write(
+        &lib,
+        "LIB_VAL=\"from_lib:${1:-none}\"\nlib_greet() {\n    echo \"hi:$1:$LIB_VAL\"\n}\n",
+    )
+    .expect("write lib");
+    std::fs::write(
+        &main,
+        format!(
+            "#!/usr/bin/env bash\nsource \"{}\" \"arg1\"\necho \"$LIB_VAL\"\nlib_greet \"user\"\n",
+            lib.display()
+        ),
+    )
+    .expect("write main");
+    let res = assert_differential_match(&main);
+    let _ = std::fs::remove_dir_all(&dir);
+    res.expect("static source inclusion match");
+}

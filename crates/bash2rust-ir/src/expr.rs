@@ -37,6 +37,7 @@ pub enum ParamExpansionOp {
         offset: Box<Word>,
         length: Option<Box<Word>>,
     },
+    Indirect,
 }
 
 /// A structured piece of a [`Word`], supporting variable interpolation and `$(...)`.
