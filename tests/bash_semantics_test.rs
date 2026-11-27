@@ -7,9 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bash2rust_verify::compat::{
-    ai_assisted_cli_args, collect_unsupported_constructs, compare_execution_results,
-    parse_bash_version, render_markdown_report_with_ai, run_ai_assisted_suite, run_compat_case,
-    run_compatibility_suite, run_with_timeout, write_markdown_report_with_ai, CompatStatus,
+    ai_assisted_cli_args, bash_program, collect_unsupported_constructs, compare_execution_results,
+    detect_bash_version, parse_bash_version, parse_requires_bash, render_markdown_report_with_ai,
+    run_ai_assisted_suite, run_compat_case, run_compatibility_suite, run_with_timeout,
+    write_markdown_report_with_ai, CompatStatus,
 };
 use bash2rust_verify::ExecutionResult;
 
@@ -59,8 +60,17 @@ fn run_bash_compatibility_corpus_and_generate_report() {
         scripts.len()
     );
 
+    let bash_prog = bash_program();
+    let host_bash = detect_bash_version();
     for script in &scripts {
-        let out = Command::new("bash")
+        if let (Some(ver), Ok(contents)) = (&host_bash, fs::read_to_string(script)) {
+            if let Some((req_maj, req_min)) = parse_requires_bash(&contents) {
+                if (ver.major, ver.minor) < (req_maj, req_min) {
+                    continue;
+                }
+            }
+        }
+        let out = Command::new(&bash_prog)
             .arg("-n")
             .arg(script)
             .output()

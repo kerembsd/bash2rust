@@ -2,14 +2,14 @@
 
 > **Scope Disclaimer:** All pass rates and metrics below apply strictly to the tested compatibility corpus (`tests/compatibility/`) under isolated deterministic execution, **not** universal Bash compatibility.
 
-- **Host Bash Version:** 3.2.57 (`GNU bash, version 3.2.57(1)-release (arm64-apple-darwin26)`)
+- **Host Bash Version:** 5.3.20 (`GNU bash, version 5.3.20(1)-release (aarch64-apple-darwin27.0.0)`)
 - **Minimum Supported Bash Version:** `3.2`
 
 ## Deterministic Mode
 
-- **Total tests:** 46
-- **Passed:** 45 (97.8%)
-- **Skipped:** 1
+- **Total tests:** 52
+- **Passed:** 52 (100.0%)
+- **Skipped:** 0
 - **Failed:** 0
 - **Compilation Failures:** 0
 - **Semantic Mismatches:** 0
@@ -21,13 +21,13 @@
 | Word Splitting (`01_word_splitting_unquoted.sh`, `02_word_splitting_ifs.sh`, `03_word_splitting_empty_whitespace.sh`) | 3 | 3 | 0 | 100.0% |
 | Quoting (`04_quoting_single_vs_double.sh`, `05_quoting_escapes_and_mixed.sh`, `06_quoting_spaces_in_args.sh`, `39_ansi_c_quoting_and_local_arrays.sh`) | 4 | 4 | 0 | 100.0% |
 | Globbing (`07_globbing_star_question.sh`, `08_globbing_no_match_literal.sh`, `09_globbing_brackets_hidden.sh`) | 3 | 3 | 0 | 100.0% |
-| set -euo pipefail (`10_strict_errexit_aborts.sh`, `11_strict_errexit_in_if.sh`, `12_strict_nounset_unbound.sh`, `13_strict_pipefail_propagation.sh`, `33_umask_and_builtins.sh`, `35_special_vars_nounset.sh`, `41_strict_unguarded_errexit_and_while_read.sh`, `42_strict_trap_exit_and_subshell_cwd.sh`) | 8 | 8 | 0 | 100.0% |
+| set -euo pipefail (`10_strict_errexit_aborts.sh`, `11_strict_errexit_in_if.sh`, `12_strict_nounset_unbound.sh`, `13_strict_pipefail_propagation.sh`, `33_umask_and_builtins.sh`, `35_special_vars_nounset.sh`, `41_strict_unguarded_errexit_and_while_read.sh`, `42_strict_trap_exit_and_subshell_cwd.sh`, `50_bash_rematch_shopt_special_vars.sh`) | 9 | 9 | 0 | 100.0% |
 | Subshells (`14_subshell_var_isolation.sh`, `15_subshell_cwd_isolation.sh`, `16_subshell_exit_code.sh`) | 3 | 3 | 0 | 100.0% |
 | Pipelines (`17_pipeline_multistage.sh`, `18_pipeline_exit_code_default.sh`, `19_pipeline_negation.sh`) | 3 | 3 | 0 | 100.0% |
 | Command Substitution (`20_cmdsubst_trailing_newlines.sh`, `21_cmdsubst_nested_quoted.sh`, `22_cmdsubst_exit_status.sh`) | 3 | 3 | 0 | 100.0% |
-| Redirections & Stderr (`23_redir_truncate_append_input.sh`, `24_redir_stderr_separation.sh`, `25_redir_stderr_to_stdout.sh`, `36_heredoc_herestring_procsubst.sh`, `37_command_v_path_and_negation.sh`, `43_source_static_and_dynamic.sh`, `44_indirect_expansion.sh`, `46_nameref_declare_n.sh`) | 8 | 7 | 0 | 87.5% |
-| Case & Parameter Expansion (`26_case_statement.sh`, `27_parameter_expansion.sh`, `40_nested_param_exp_and_compound_subst.sh`) | 3 | 3 | 0 | 100.0% |
-| Arithmetic & C-Style Loops (`28_arithmetic_and_c_for.sh`, `38_dash_array_arith_pct.sh`) | 2 | 2 | 0 | 100.0% |
+| Redirections & Stderr (`23_redir_truncate_append_input.sh`, `24_redir_stderr_separation.sh`, `25_redir_stderr_to_stdout.sh`, `36_heredoc_herestring_procsubst.sh`, `37_command_v_path_and_negation.sh`, `43_source_static_and_dynamic.sh`, `44_indirect_expansion.sh`, `46_nameref_declare_n.sh`, `48_arrays_mapfile_assoc.sh`, `49_printf_strftime_and_read.sh`, `52_proc_subst_and_redirects.sh`) | 11 | 11 | 0 | 100.0% |
+| Case & Parameter Expansion (`26_case_statement.sh`, `27_parameter_expansion.sh`, `40_nested_param_exp_and_compound_subst.sh`, `47_case_mod_and_param_exp.sh`) | 4 | 4 | 0 | 100.0% |
+| Arithmetic & C-Style Loops (`28_arithmetic_and_c_for.sh`, `38_dash_array_arith_pct.sh`, `51_brace_expansion_and_arith.sh`) | 3 | 3 | 0 | 100.0% |
 | Extended Tests (`29_extended_test_regex.sh`) | 1 | 1 | 0 | 100.0% |
 | Function Scoping (`30_function_scoping.sh`, `31_function_calls_and_return.sh`, `32_function_command_subst.sh`, `34_shift_and_fn_dispatch.sh`, `45_dynamic_fn_dispatch.sh`) | 5 | 5 | 0 | 100.0% |
 
@@ -67,6 +67,7 @@
 - `35_special_vars_nounset.sh` — **PASS** (unsupported: none)
 - `41_strict_unguarded_errexit_and_while_read.sh` — **PASS** (unsupported: none)
 - `42_strict_trap_exit_and_subshell_cwd.sh` — **PASS** (unsupported: none)
+- `50_bash_rematch_shopt_special_vars.sh` — **PASS** (unsupported: none)
 
 ### Subshells
 
@@ -95,18 +96,23 @@
 - `37_command_v_path_and_negation.sh` — **PASS** (unsupported: none)
 - `43_source_static_and_dynamic.sh` — **PASS** (unsupported: none)
 - `44_indirect_expansion.sh` — **PASS** (unsupported: none)
-- `46_nameref_declare_n.sh` — **SKIPPED (requires bash >= 4.3, host is 3.2)** (unsupported: none)
+- `46_nameref_declare_n.sh` — **PASS** (unsupported: none)
+- `48_arrays_mapfile_assoc.sh` — **PASS** (unsupported: none)
+- `49_printf_strftime_and_read.sh` — **PASS** (unsupported: none)
+- `52_proc_subst_and_redirects.sh` — **PASS** (unsupported: none)
 
 ### Case & Parameter Expansion
 
 - `26_case_statement.sh` — **PASS** (unsupported: none)
 - `27_parameter_expansion.sh` — **PASS** (unsupported: none)
 - `40_nested_param_exp_and_compound_subst.sh` — **PASS** (unsupported: none)
+- `47_case_mod_and_param_exp.sh` — **PASS** (unsupported: none)
 
 ### Arithmetic & C-Style Loops
 
 - `28_arithmetic_and_c_for.sh` — **PASS** (unsupported: none)
 - `38_dash_array_arith_pct.sh` — **PASS** (unsupported: none)
+- `51_brace_expansion_and_arith.sh` — **PASS** (unsupported: none)
 
 ### Extended Tests
 

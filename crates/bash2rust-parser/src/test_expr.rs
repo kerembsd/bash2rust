@@ -226,7 +226,16 @@ pub(crate) fn lower_extended_test(
         },
         ast::ExtendedTestExpr::BinaryTest(pred, lhs, rhs) => {
             let lhs_word = lower_word(lhs);
-            let rhs_word = lower_word(rhs);
+            let mut rhs_word = lower_word(rhs);
+            let is_b2r_regex = rhs_word.raw.contains("__B2R_REGEX__");
+            if is_b2r_regex {
+                rhs_word.raw = rhs_word.raw.replace("__B2R_REGEX__", "");
+                for part in &mut rhs_word.parts {
+                    if let bash2rust_ir::WordPart::Literal(s) = part {
+                        *s = s.replace("__B2R_REGEX__", "");
+                    }
+                }
+            }
             if matches!(pred, ast::BinaryPredicate::StringDoesNotExactlyMatchPattern) {
                 if rhs_word.has_quotes {
                     return Some(TestExpr::Binary {
@@ -252,6 +261,9 @@ pub(crate) fn lower_extended_test(
                 }
                 ast::BinaryPredicate::StringDoesNotExactlyMatchString => BinaryTestOp::StrNe,
                 ast::BinaryPredicate::StringMatchesRegex => BinaryTestOp::RegexMatch,
+                ast::BinaryPredicate::StringContainsSubstring if is_b2r_regex => {
+                    BinaryTestOp::RegexMatch
+                }
                 ast::BinaryPredicate::ArithmeticEqualTo => BinaryTestOp::IntEq,
                 ast::BinaryPredicate::ArithmeticNotEqualTo => BinaryTestOp::IntNe,
                 ast::BinaryPredicate::ArithmeticLessThan => BinaryTestOp::IntLt,

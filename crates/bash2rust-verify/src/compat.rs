@@ -68,9 +68,28 @@ pub fn parse_bash_version(version_output: &str) -> Option<BashVersion> {
     })
 }
 
-/// Detects the host `bash` version by running `bash --version`.
+/// Returns the `bash` executable configured via `BASH2RUST_BASH`, or resolves `"bash"` from `PATH`.
+pub fn bash_program() -> String {
+    if let Ok(v) = std::env::var("BASH2RUST_BASH") {
+        if !v.trim().is_empty() {
+            return v;
+        }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join("bash");
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    "bash".to_owned()
+}
+
+/// Detects the host `bash` version by running `$BASH2RUST_BASH --version` (or `bash --version`).
 pub fn detect_bash_version() -> Option<BashVersion> {
-    let output = Command::new("bash").arg("--version").output().ok()?;
+    let bash = bash_program();
+    let output = Command::new(&bash).arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -78,7 +97,7 @@ pub fn detect_bash_version() -> Option<BashVersion> {
     parse_bash_version(&stdout)
 }
 
-fn parse_requires_bash(script_contents: &str) -> Option<(u32, u32)> {
+pub fn parse_requires_bash(script_contents: &str) -> Option<(u32, u32)> {
     for line in script_contents.lines().take(16) {
         let trimmed = line.trim();
         if let Some(rest) = trimmed
@@ -325,9 +344,15 @@ fn collect_from_word(word: &Word, out: &mut Vec<String>) {
         match part {
             WordPart::CommandSubst(inner) => collect_from_stmt(inner, out),
             WordPart::ParamExpansion {
-                op: ParamExpansionOp::UseDefault { default, .. },
+                op:
+                    ParamExpansionOp::UseDefault { default, .. }
+                    | ParamExpansionOp::AssignDefault { default, .. },
                 ..
             } => collect_from_word(default, out),
+            WordPart::ParamExpansion {
+                op: ParamExpansionOp::UseAlt { alt, .. },
+                ..
+            } => collect_from_word(alt, out),
             WordPart::ParamExpansion {
                 op: ParamExpansionOp::ArrayElement { index },
                 ..
@@ -342,11 +367,24 @@ fn collect_from_word(word: &Word, out: &mut Vec<String>) {
                         pattern,
                         replacement,
                         ..
+                    }
+                    | ParamExpansionOp::ArrayReplace {
+                        pattern,
+                        replacement,
+                        ..
                     },
                 ..
             } => {
                 collect_from_word(pattern, out);
                 collect_from_word(replacement, out);
+            }
+            WordPart::ParamExpansion {
+                op: ParamExpansionOp::CaseModify { pattern, .. },
+                ..
+            } => {
+                if let Some(pat) = pattern {
+                    collect_from_word(pat, out);
+                }
             }
             WordPart::ParamExpansion {
                 op:
@@ -367,7 +405,8 @@ fn collect_from_word(word: &Word, out: &mut Vec<String>) {
                     ParamExpansionOp::Length
                     | ParamExpansionOp::Indirect
                     | ParamExpansionOp::ArrayAll
-                    | ParamExpansionOp::ArrayAllIfSet,
+                    | ParamExpansionOp::ArrayAllIfSet
+                    | ParamExpansionOp::ArrayKeys,
                 ..
             } => {}
         }
@@ -648,20 +687,26 @@ pub fn run_compat_case(
 
     let bash_workdir = TempDirGuard::create("bash2rust_compat_bash")?;
     let bash_arg = abs_script.to_string_lossy().into_owned();
-    let bash_res =
-        match run_with_timeout("bash", &[&bash_arg], &bash_workdir.path, timeout, "bash")? {
-            Ok(res) => res,
-            Err(timeout_status) => {
-                return Ok(CompatCaseResult {
-                    name,
-                    path: script_path.to_path_buf(),
-                    category,
-                    mode: CompatMode::Deterministic,
-                    status: timeout_status,
-                    unsupported_constructs: Vec::new(),
-                });
-            }
-        };
+    let bash_prog = bash_program();
+    let bash_res = match run_with_timeout(
+        &bash_prog,
+        &[&bash_arg],
+        &bash_workdir.path,
+        timeout,
+        "bash",
+    )? {
+        Ok(res) => res,
+        Err(timeout_status) => {
+            return Ok(CompatCaseResult {
+                name,
+                path: script_path.to_path_buf(),
+                category,
+                mode: CompatMode::Deterministic,
+                status: timeout_status,
+                unsupported_constructs: Vec::new(),
+            });
+        }
+    };
 
     let compiled_ir = match bash2rust_core::compile_file_to_ir(&abs_script) {
         Ok(out) => out.ir,

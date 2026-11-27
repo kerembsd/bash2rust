@@ -5,8 +5,8 @@ pub mod span;
 pub mod stmt;
 
 pub use expr::{
-    ArithExpr, ArrayItem, AssignTarget, AssignValue, Assignment, ParamExpansionOp, VarQualifier,
-    Word, WordPart,
+    ArithExpr, ArrayItem, AssignTarget, AssignValue, Assignment, CaseModifyMode, ParamExpansionOp,
+    VarQualifier, Word, WordPart,
 };
 pub use span::{SourcePos, SourceSpan};
 pub use stmt::{

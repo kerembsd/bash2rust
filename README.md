@@ -61,16 +61,16 @@ cargo test --workspace
 
 | Category | Supported Features |
 | :--- | :--- |
-| Variables & Arrays | Scalar/array assignments, `local`/`export`/`readonly`, `declare -a`, `declare -n`/`local -n` namerefs, `${!var}` indirect expansion, `+=`, `${#arr[@]}` |
-| Quoting & Expansion | Single/double quotes, `$'...'` ANSI-C escapes, word splitting (`IFS`), globbing (`*`, `?`, `[...]`) |
-| Strict Mode | `set -euo pipefail`, `nounset` diagnostics, dynamic `errexit` suppression in unguarded conditions |
-| Arithmetic & Loops | `$((...))`, `((...))`, `ARRAY[i]` indexing, C-style `for ((...))`, `for`/`while`/`until` |
-| Parameter Expansion | `${var:-def}`, `${var-def}`, `${#var}`, `${var#pat}`, `${var%pat}`, `${var/pat/rep}`, slicing |
-| Control Flow & Functions | `if`/`elif`/`else`, `case ... esac`, functions, `local` hoisting, `shift`, `return`, `source`/`.` (static inlining + dynamic fallback), dynamic `"$@"` dispatch |
-| I/O, Pipelines & Subshells | Multi-stage pipelines, `>`, `>>`, `<`, `2>&1`, heredocs (`<<`, `<<-`), `<<<`, `<(...)`, subshell `( ... )` cwd isolation |
-| Signals, Tests & Diagnostics | `trap` (`EXIT`, `INT`, `TERM`, `ERR`, `trap - ...`), `[ ... ]`, `[[ ... ]]` with `=~` regex matching, `miette` source-span diagnostics |
+| Variables & Arrays | Scalar/array assignments, `local`/`export`/`readonly`, `declare -a`/`-A` associative arrays, `declare -n`/`local -n` namerefs, `${!var}` indirect expansion, `${!arr[@]}`, `mapfile`/`readarray`, `+=`, `${#arr[@]}` |
+| Quoting & Expansion | Single/double quotes, `$'...'` ANSI-C escapes, brace expansion (`{a,b}`, `{1..10..2}`, `{a..z}`), word splitting (`IFS`), globbing (`*`, `?`, `[...]`) |
+| Strict Mode | `set -euo pipefail`, `set -f`/`+f`, `shopt` (`checkwinsize`, `extdebug`), `nounset` diagnostics, dynamic `errexit` suppression in unguarded conditions |
+| Arithmetic & Loops | `$((...))`, `((...))`, `base#num` (`16#ff`), `?:` ternary, `ARRAY[i]` indexing, C-style `for ((...))`, `for`/`while`/`until` |
+| Parameter Expansion | `${var:-def}`, `${var:=def}`, `${var:+alt}`, `${#var}`, `${var#pat}`, `${var%pat}`, `${var/pat/rep}`, `${var^/^^/,/,,/~/~~}` case modification, slicing, `$_` |
+| Control Flow & Functions | `if`/`elif`/`else`, `case ... esac`, functions, `declare -F`, `FUNCNAME`, `local` hoisting, `shift`, `return`, `source`/`.` (static inlining + dynamic fallback), dynamic `"$@"` dispatch |
+| I/O, Pipelines & Subshells | Multi-stage pipelines, `>`, `>>`, `<`, `2>&1`, bare `>file`, `$(<file)`, heredocs (`<<`, `<<-`), `<<<`, `<(...)`, `<> <(...)`, `printf` (`-v`, `%(fmt)T`), `read` (`-t`, `-d`), subshell `( ... )` cwd isolation |
+| Signals, Tests & Diagnostics | `trap` (`EXIT`, `INT`, `TERM`, `ERR`, `trap - ...`), `[ ... ]`, `[[ ... ]]` with `=~` regex matching (`BASH_REMATCH`), `miette` source-span diagnostics |
 
-On the 46-script differential corpus (`tests/compatibility/`), deterministic mode achieves **45/45 (100.0%)** active parity with system `bash` on host Bash 3.2 (with `46_nameref_declare_n.sh` gated on Bash >= 4.3; **0** compile failures, **0** semantic mismatches, and **0** unsupported scripts). Newly supported features include `source`/`.`, `${!var}`, `declare -n`/`local -n`, dynamic function dispatch, and `miette` source-span diagnostics. See [docs/COMPATIBILITY_REPORT.md](docs/COMPATIBILITY_REPORT.md) for the full per-script breakdown.
+On the 52-script differential corpus (`tests/compatibility/`), deterministic mode achieves **52/52 (100.0%)** parity with GNU Bash 5.3 (**0** compile failures, **0** semantic mismatches, and **0** unsupported scripts; scripts with `# requires-bash: 4.0`/`4.2`/`4.3` are automatically gated when running on older host shells such as macOS Bash 3.2). See [docs/COMPATIBILITY_REPORT.md](docs/COMPATIBILITY_REPORT.md) for the full per-script breakdown.
 
 Any construct outside deterministic lowering emits `Stmt::Unsupported` and can optionally be translated via `--ai ollama|anthropic|openai` (`bash2rust-ai`). For a full-scale transpilation example, see [kerembsd/archinstall-tui-rs](https://github.com/kerembsd/archinstall-tui-rs).
 
@@ -78,7 +78,7 @@ Any construct outside deterministic lowering emits `Stmt::Unsupported` and can o
 
 - `crates/` — Compiler, runtime, verification, AI fallback, and CLI workspace crates
 - `tests/fixtures/` — Unit-level Bash fixtures for parser and codegen tests
-- `tests/compatibility/` — 46 differential compatibility scripts (`bash` vs. `bash2rust`)
+- `tests/compatibility/` — 52 differential compatibility scripts (`bash` vs. `bash2rust`)
 - `docs/` — Generated compatibility report (`docs/COMPATIBILITY_REPORT.md`)
 
 ## License

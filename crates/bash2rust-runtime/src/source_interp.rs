@@ -81,7 +81,7 @@ impl ShellState {
         Path::new(".").join(path)
     }
 
-    fn exec_sourced_lines(&mut self, lines: &[String]) -> RuntimeResult<Option<i32>> {
+    pub(crate) fn exec_sourced_lines(&mut self, lines: &[String]) -> RuntimeResult<Option<i32>> {
         let mut idx = 0usize;
         while idx < lines.len() {
             let trimmed = lines[idx].trim();
@@ -350,7 +350,11 @@ impl ShellState {
                 continue;
             }
             if c == '\\' && !in_single && i + 1 < chars.len() {
-                cur.push(chars[i + 1]);
+                let next_c = chars[i + 1];
+                if in_double && !matches!(next_c, '"' | '\\' | '$' | '`' | '\n') {
+                    cur.push('\\');
+                }
+                cur.push(next_c);
                 in_token = true;
                 i += 2;
                 continue;

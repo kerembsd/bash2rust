@@ -5,6 +5,18 @@ use serde::{Deserialize, Serialize};
 use crate::span::SourceSpan;
 use crate::stmt::Stmt;
 
+/// Case-modification mode for `${var^}`, `${var^^}`, `${var,}`, `${var,,}`, `${var~}`, `${var~~}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaseModifyMode {
+    UpperFirst,
+    UpperAll,
+    LowerFirst,
+    LowerAll,
+    ToggleFirst,
+    ToggleAll,
+}
+
 /// Operation for a `${...}` parameter expansion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -14,11 +26,25 @@ pub enum ParamExpansionOp {
         default: Word,
         colon: bool,
     },
+    AssignDefault {
+        default: Word,
+        colon: bool,
+    },
+    UseAlt {
+        alt: Word,
+        colon: bool,
+    },
     ArrayElement {
         index: Box<Word>,
     },
     ArrayAll,
     ArrayAllIfSet,
+    ArrayKeys,
+    ArrayReplace {
+        pattern: Box<Word>,
+        replacement: Box<Word>,
+        replace_all: bool,
+    },
     ArraySlice {
         offset: Box<Word>,
         length: Option<Box<Word>>,
@@ -36,6 +62,10 @@ pub enum ParamExpansionOp {
     Substring {
         offset: Box<Word>,
         length: Option<Box<Word>>,
+    },
+    CaseModify {
+        mode: CaseModifyMode,
+        pattern: Option<Box<Word>>,
     },
     Indirect,
 }

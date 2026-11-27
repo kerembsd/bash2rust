@@ -2,9 +2,9 @@
 
 use bash2rust_ir::{
     AndOrItem, AndOrStmt, ArithExpr, ArithForStmt, ArrayItem, AssignTarget, AssignValue,
-    Assignment, Block, CaseItem, CaseStmt, CommandCall, ElifBranch, ForStmt, FunctionDef, IfStmt,
-    IrProgram, LogicalOp, LoopKind, LoopStmt, ParamExpansionOp, PipelineStmt, Redirect,
-    RedirectKind, SourcePos, SourceSpan, Stmt, TestStmt, VarQualifier, Word, WordPart,
+    Assignment, Block, CaseItem, CaseModifyMode, CaseStmt, CommandCall, ElifBranch, ForStmt,
+    FunctionDef, IfStmt, IrProgram, LogicalOp, LoopKind, LoopStmt, ParamExpansionOp, PipelineStmt,
+    Redirect, RedirectKind, SourcePos, SourceSpan, Stmt, TestStmt, VarQualifier, Word, WordPart,
 };
 use brush_parser::{ast, SourcePosition, SourceSpan as BrushSourceSpan};
 
@@ -50,6 +50,234 @@ fn lower_word(word: &ast::Word) -> Word {
         has_quotes,
         part_quoted,
     }
+}
+
+fn lower_word_with_braces(word: &ast::Word) -> Vec<Word> {
+    let span = word.loc.as_ref().map(lower_span);
+    expand_braces_raw(&word.value)
+        .into_iter()
+        .map(|raw| {
+            let (parts, has_quotes, part_quoted) = parse_word_parts(&raw);
+            Word {
+                raw,
+                span,
+                parts,
+                has_quotes,
+                part_quoted,
+            }
+        })
+        .collect()
+}
+
+fn expand_braces_raw(raw: &str) -> Vec<String> {
+    if !raw.contains('{') {
+        return vec![raw.to_owned()];
+    }
+    let bytes = raw.as_bytes();
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_single {
+            if b == b'\'' {
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if b == b'\'' && !in_double {
+            in_single = true;
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+        if !in_double && b == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            if let Some(end) = find_matching_brace(bytes, i + 2) {
+                i = end + 1;
+                continue;
+            }
+        }
+        if !in_double && b == b'{' {
+            if let Some((items, end_idx)) = try_parse_brace_group(raw, i) {
+                let prefix = &raw[..i];
+                let suffix = &raw[end_idx + 1..];
+                let mut out = Vec::new();
+                for item in items {
+                    let combined = format!("{prefix}{item}{suffix}");
+                    out.extend(expand_braces_raw(&combined));
+                }
+                return out;
+            }
+        }
+        i += 1;
+    }
+    vec![raw.to_owned()]
+}
+
+fn try_parse_brace_group(raw: &str, open_idx: usize) -> Option<(Vec<String>, usize)> {
+    let bytes = raw.as_bytes();
+    let mut i = open_idx + 1;
+    let mut depth = 1usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut comma_positions = Vec::new();
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_single {
+            if b == b'\'' {
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if b == b'\'' && !in_double {
+            in_single = true;
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+        if !in_double && b == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            if let Some(end) = find_matching_brace(bytes, i + 2) {
+                i = end + 1;
+                continue;
+            }
+        }
+        if !in_double {
+            if b == b'{' {
+                depth += 1;
+            } else if b == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    let inner = &raw[open_idx + 1..i];
+                    if !comma_positions.is_empty() {
+                        let mut items = Vec::new();
+                        let mut prev = open_idx + 1;
+                        for pos in comma_positions {
+                            items.push(raw[prev..pos].to_owned());
+                            prev = pos + 1;
+                        }
+                        items.push(raw[prev..i].to_owned());
+                        return Some((items, i));
+                    }
+                    if let Some(range_items) = try_expand_brace_range(inner) {
+                        return Some((range_items, i));
+                    }
+                    return None;
+                }
+            } else if b == b',' && depth == 1 {
+                comma_positions.push(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn try_expand_brace_range(inner: &str) -> Option<Vec<String>> {
+    let parts: Vec<&str> = inner.split("..").collect();
+    if parts.len() != 2 && parts.len() != 3 {
+        return None;
+    }
+    let start_s = parts[0];
+    let end_s = parts[1];
+    let step_opt = if parts.len() == 3 {
+        let s = parts[2].parse::<i64>().ok()?;
+        if s == 0 {
+            return None;
+        }
+        Some(s.unsigned_abs() as i64)
+    } else {
+        None
+    };
+
+    if let (Ok(start), Ok(end)) = (start_s.parse::<i64>(), end_s.parse::<i64>()) {
+        let step = step_opt.unwrap_or(1);
+        let pad_width = [start_s, end_s]
+            .iter()
+            .filter_map(|s| {
+                let digits = s.strip_prefix('-').unwrap_or(s);
+                if digits.len() > 1 && digits.starts_with('0') {
+                    Some(s.len())
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(0);
+        let mut out = Vec::new();
+        let mut cur = start;
+        if start <= end {
+            while cur <= end && out.len() < 10_000 {
+                if pad_width > 0 {
+                    out.push(format!("{cur:0pad_width$}"));
+                } else {
+                    out.push(cur.to_string());
+                }
+                cur = cur.saturating_add(step);
+            }
+        } else {
+            while cur >= end && out.len() < 10_000 {
+                if pad_width > 0 {
+                    out.push(format!("{cur:0pad_width$}"));
+                } else {
+                    out.push(cur.to_string());
+                }
+                cur = cur.saturating_sub(step);
+            }
+        }
+        return Some(out);
+    }
+
+    if start_s.len() == 1 && end_s.len() == 1 {
+        let sc = start_s.chars().next()?;
+        let ec = end_s.chars().next()?;
+        if sc.is_ascii_alphabetic() && ec.is_ascii_alphabetic() {
+            let step = step_opt.unwrap_or(1) as u8;
+            let sb = sc as u8;
+            let eb = ec as u8;
+            let mut out = Vec::new();
+            if sb <= eb {
+                let mut cur = sb;
+                while cur <= eb {
+                    out.push((cur as char).to_string());
+                    cur = match cur.checked_add(step) {
+                        Some(n) => n,
+                        None => break,
+                    };
+                }
+            } else {
+                let mut cur = sb;
+                while cur >= eb {
+                    out.push((cur as char).to_string());
+                    cur = match cur.checked_sub(step) {
+                        Some(n) => n,
+                        None => break,
+                    };
+                }
+            }
+            return Some(out);
+        }
+    }
+
+    None
 }
 
 /// Scans a Bash word using segment-by-segment quote-state tokenization
@@ -229,6 +457,9 @@ fn split_replace_parts(s: &str) -> (String, String) {
 }
 
 fn unescape_param_pattern(s: &str) -> String {
+    if s.starts_with("$'") {
+        return s.to_owned();
+    }
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -422,6 +653,19 @@ fn try_parse_dollar(
                 }
             }
             if let Some(target) = inner.strip_prefix('!') {
+                if let Some(arr_name) = target
+                    .strip_suffix("[@]")
+                    .or_else(|| target.strip_suffix("[*]"))
+                {
+                    if is_simple_var_ref(arr_name) {
+                        flush_literal(literal_buf, parts);
+                        parts.push(WordPart::ParamExpansion {
+                            name: arr_name.to_owned(),
+                            op: ParamExpansionOp::ArrayKeys,
+                        });
+                        return Some(close_idx + 1);
+                    }
+                }
                 if is_simple_var_ref(target) {
                     flush_literal(literal_buf, parts);
                     parts.push(WordPart::ParamExpansion {
@@ -458,6 +702,47 @@ fn try_parse_dollar(
                     parts.push(WordPart::ParamExpansion {
                         name: arr_name.to_owned(),
                         op: ParamExpansionOp::ArrayAllIfSet,
+                    });
+                    return Some(close_idx + 1);
+                }
+            }
+            if let Some((arr_name, after_slash)) = inner
+                .split_once("[@]//")
+                .or_else(|| inner.split_once("[*]//"))
+                .map(|(n, r)| (n, (true, r)))
+                .or_else(|| {
+                    inner
+                        .split_once("[@]/")
+                        .or_else(|| inner.split_once("[*]/"))
+                        .map(|(n, r)| (n, (false, r)))
+                })
+            {
+                if is_simple_var_ref(arr_name) {
+                    let (replace_all, rest_s) = after_slash;
+                    let (pat_raw, repl_raw) = split_replace_parts(rest_s);
+                    let pat_clean = unescape_param_pattern(&pat_raw);
+                    let (pp, phq, ppq) = parse_word_parts(&pat_clean);
+                    let (rp, rhq, rpq) = parse_word_parts(&repl_raw);
+                    flush_literal(literal_buf, parts);
+                    parts.push(WordPart::ParamExpansion {
+                        name: arr_name.to_owned(),
+                        op: ParamExpansionOp::ArrayReplace {
+                            pattern: Box::new(Word {
+                                raw: pat_clean,
+                                span: None,
+                                parts: pp,
+                                has_quotes: phq,
+                                part_quoted: ppq,
+                            }),
+                            replacement: Box::new(Word {
+                                raw: repl_raw,
+                                span: None,
+                                parts: rp,
+                                has_quotes: rhq,
+                                part_quoted: rpq,
+                            }),
+                            replace_all,
+                        },
                     });
                     return Some(close_idx + 1);
                 }
@@ -555,6 +840,46 @@ fn try_parse_dollar(
                         });
                         return Some(close_idx + 1);
                     }
+                    if let Some(def_str) =
+                        rest.strip_prefix(":=").or_else(|| rest.strip_prefix('='))
+                    {
+                        let colon = rest.starts_with(":=");
+                        let (def_parts, def_has_quotes, def_part_quoted) =
+                            parse_word_parts(def_str);
+                        let default = Word {
+                            raw: def_str.to_owned(),
+                            span: None,
+                            parts: def_parts,
+                            has_quotes: def_has_quotes,
+                            part_quoted: def_part_quoted,
+                        };
+                        flush_literal(literal_buf, parts);
+                        parts.push(WordPart::ParamExpansion {
+                            name: name.to_owned(),
+                            op: ParamExpansionOp::AssignDefault { default, colon },
+                        });
+                        return Some(close_idx + 1);
+                    }
+                    if let Some(alt_str) =
+                        rest.strip_prefix(":+").or_else(|| rest.strip_prefix('+'))
+                    {
+                        let colon = rest.starts_with(":+");
+                        let (alt_parts, alt_has_quotes, alt_part_quoted) =
+                            parse_word_parts(alt_str);
+                        let alt = Word {
+                            raw: alt_str.to_owned(),
+                            span: None,
+                            parts: alt_parts,
+                            has_quotes: alt_has_quotes,
+                            part_quoted: alt_part_quoted,
+                        };
+                        flush_literal(literal_buf, parts);
+                        parts.push(WordPart::ParamExpansion {
+                            name: name.to_owned(),
+                            op: ParamExpansionOp::UseAlt { alt, colon },
+                        });
+                        return Some(close_idx + 1);
+                    }
                     if let Some((pat_str, is_suffix, longest)) = rest
                         .strip_prefix("##")
                         .map(|p| (p, false, true))
@@ -613,7 +938,53 @@ fn try_parse_dollar(
                         });
                         return Some(close_idx + 1);
                     }
-                    if let Some(slice_spec) = rest.strip_prefix(':') {
+                    if let Some((mode, pat_s)) = rest
+                        .strip_prefix(",,")
+                        .map(|p| (CaseModifyMode::LowerAll, p))
+                        .or_else(|| {
+                            rest.strip_prefix(',')
+                                .map(|p| (CaseModifyMode::LowerFirst, p))
+                        })
+                        .or_else(|| {
+                            rest.strip_prefix("^^")
+                                .map(|p| (CaseModifyMode::UpperAll, p))
+                        })
+                        .or_else(|| {
+                            rest.strip_prefix('^')
+                                .map(|p| (CaseModifyMode::UpperFirst, p))
+                        })
+                        .or_else(|| {
+                            rest.strip_prefix("~~")
+                                .map(|p| (CaseModifyMode::ToggleAll, p))
+                        })
+                        .or_else(|| {
+                            rest.strip_prefix('~')
+                                .map(|p| (CaseModifyMode::ToggleFirst, p))
+                        })
+                    {
+                        let pattern = if pat_s.is_empty() {
+                            None
+                        } else {
+                            let (pp, phq, ppq) = parse_word_parts(pat_s);
+                            Some(Box::new(Word {
+                                raw: pat_s.to_owned(),
+                                span: None,
+                                parts: pp,
+                                has_quotes: phq,
+                                part_quoted: ppq,
+                            }))
+                        };
+                        flush_literal(literal_buf, parts);
+                        parts.push(WordPart::ParamExpansion {
+                            name: name.to_owned(),
+                            op: ParamExpansionOp::CaseModify { mode, pattern },
+                        });
+                        return Some(close_idx + 1);
+                    }
+                    if let Some(slice_spec) = rest
+                        .strip_prefix(':')
+                        .filter(|s| !s.starts_with(['+', '-', '=', '?']))
+                    {
                         let (off_s, len_opt_s) = match slice_spec.split_once(':') {
                             Some((o, l)) => (o.trim(), Some(l.trim())),
                             None => (slice_spec.trim(), None),
@@ -888,7 +1259,7 @@ fn lower_compound_command(compound: &ast::CompoundCommand) -> Stmt {
             values: for_cmd
                 .values
                 .as_ref()
-                .map(|vals| vals.iter().map(lower_word).collect()),
+                .map(|vals| vals.iter().flat_map(lower_word_with_braces).collect()),
             body: Block::new(lower_compound_list(&for_cmd.body.list)),
             span: Some(lower_span(&for_cmd.loc)),
         }),
@@ -1000,16 +1371,21 @@ fn lower_simple_command(simple: &ast::SimpleCommand) -> Stmt {
         }
     }
 
-    // Pure variable assignment (e.g. `x=1` with no command word).
+    // Pure variable assignment(s) (e.g. `x=1` or `IFS=" " arr[k]=1` with no command word).
     if simple.word_or_name.is_none()
-        && env_assignments.len() == 1
+        && !env_assignments.is_empty()
         && redirects.is_empty()
         && simple
             .suffix
             .as_ref()
             .is_none_or(|suffix| suffix.0.is_empty())
     {
-        return Stmt::Assign(env_assignments.remove(0));
+        if env_assignments.len() == 1 {
+            return Stmt::Assign(env_assignments.remove(0));
+        }
+        return Stmt::Block(Block::new(
+            env_assignments.into_iter().map(Stmt::Assign).collect(),
+        ));
     }
 
     // Declaration builtins (`local x=1`, `export x=1`, `readonly x=1`).
@@ -1056,11 +1432,11 @@ fn lower_simple_command(simple: &ast::SimpleCommand) -> Stmt {
         for item in &suffix.0 {
             match item {
                 ast::CommandPrefixOrSuffixItem::Word(word) => {
-                    args.push(lower_word(word));
+                    args.extend(lower_word_with_braces(word));
                     raw_arg_words.push(word.clone());
                 }
                 ast::CommandPrefixOrSuffixItem::AssignmentWord(_, word) => {
-                    args.push(lower_word(word));
+                    args.extend(lower_word_with_braces(word));
                     raw_arg_words.push(word.clone());
                 }
                 ast::CommandPrefixOrSuffixItem::IoRedirect(redir) => {
@@ -1242,6 +1618,32 @@ fn lower_io_redirect(redir: &ast::IoRedirect) -> Option<Redirect> {
                         None
                     }
                 }
+                ast::IoFileRedirectKind::ReadAndWrite => match target {
+                    ast::IoFileRedirectTarget::ProcessSubstitution(
+                        ast::ProcessSubstitutionKind::Read,
+                        subshell_cmd,
+                    ) => {
+                        let stmts = lower_compound_list(&subshell_cmd.list);
+                        let inner_stmt = if stmts.len() == 1 {
+                            stmts.into_iter().next().unwrap()
+                        } else {
+                            Stmt::Block(Block::new(stmts))
+                        };
+                        Some(Redirect {
+                            fd: fd_u32,
+                            kind: RedirectKind::ReadWriteProcSubst,
+                            target: empty_word(format!("{subshell_cmd}")),
+                            proc_subst: Some(Box::new(inner_stmt)),
+                        })
+                    }
+                    ast::IoFileRedirectTarget::Filename(w) => Some(Redirect {
+                        fd: fd_u32,
+                        kind: RedirectKind::Input,
+                        target: lower_word(w),
+                        proc_subst: None,
+                    }),
+                    _ => None,
+                },
                 ast::IoFileRedirectKind::Read => match target {
                     ast::IoFileRedirectTarget::Filename(w) => Some(Redirect {
                         fd: fd_u32,

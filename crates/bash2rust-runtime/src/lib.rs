@@ -144,15 +144,23 @@ pub struct ShellState {
     pub subshell_depth: usize,
     pub nounset: bool,
     pub pipefail: bool,
+    pub noglob: bool,
+    pub shopt_checkwinsize: bool,
+    pub shopt_extdebug: bool,
     pub ifs: Option<String>,
     pub vars: HashMap<String, String>,
     pub arrays: HashMap<String, Vec<String>>,
+    pub assoc_arrays: HashMap<String, Vec<(String, String)>>,
     pub namerefs: HashMap<String, String>,
+    pub registered_functions: Vec<String>,
     pub source_stack: Vec<std::path::PathBuf>,
     pub sourced_functions: HashMap<String, Vec<String>>,
     pub stdout_capture_stack: Vec<Vec<u8>>,
     pub stdin_override: Option<Vec<u8>>,
     pub positional_args: Vec<String>,
+    pub last_arg: String,
+    pub func_stack: Vec<String>,
+    pub argv_counts: Vec<usize>,
     pub fn_dispatcher: Option<FnDispatcher>,
     pub exit_trap: Option<String>,
     pub int_trap: Option<String>,
@@ -175,15 +183,23 @@ impl Default for ShellState {
             subshell_depth: 0,
             nounset: false,
             pipefail: false,
+            noglob: false,
+            shopt_checkwinsize: false,
+            shopt_extdebug: false,
             ifs: None,
             vars: HashMap::new(),
             arrays: HashMap::new(),
+            assoc_arrays: HashMap::new(),
             namerefs: HashMap::new(),
+            registered_functions: Vec::new(),
             source_stack: Vec::new(),
             sourced_functions: HashMap::new(),
             stdout_capture_stack: Vec::new(),
             stdin_override: None,
             positional_args: Vec::new(),
+            last_arg: std::env::args().next().unwrap_or_default(),
+            func_stack: Vec::new(),
+            argv_counts: Vec::new(),
             fn_dispatcher: None,
             exit_trap: None,
             int_trap: None,
@@ -200,6 +216,134 @@ impl ShellState {
     /// Registers the generated dynamic function dispatcher for trap callbacks.
     pub fn set_fn_dispatcher(&mut self, dispatcher: FnDispatcher) {
         self.fn_dispatcher = Some(dispatcher);
+    }
+
+    /// Registers compiled Bash function names for `declare -F`.
+    pub fn register_functions(&mut self, names: &[&str]) {
+        for &n in names {
+            if !self
+                .registered_functions
+                .iter()
+                .any(|existing| existing == n)
+            {
+                self.registered_functions.push(n.to_owned());
+            }
+        }
+    }
+
+    /// Joins positional arguments with the first character of `IFS` (or space if unset).
+    pub fn join_positional_args(&self, args: &[&str]) -> String {
+        let sep = match self.ifs.as_deref() {
+            None => " ".to_owned(),
+            Some("") => String::new(),
+            Some(ifs) => ifs
+                .chars()
+                .next()
+                .map(|c| c.to_string())
+                .unwrap_or_default(),
+        };
+        args.join(&sep)
+    }
+
+    /// Returns `true` if `name` was declared as an associative array (`declare -A`).
+    pub fn is_assoc_array(&self, name: &str) -> bool {
+        let target = self.resolve_nameref(name);
+        self.assoc_arrays.contains_key(target)
+    }
+
+    /// Sets an associative array entry.
+    pub fn set_assoc_elem(&mut self, name: &str, key: String, val: String) {
+        let target = self.resolve_nameref(name).to_owned();
+        let entries = self.assoc_arrays.entry(target).or_default();
+        if let Some(existing) = entries.iter_mut().find(|(k, _)| k == &key) {
+            existing.1 = val;
+        } else {
+            entries.push((key, val));
+        }
+    }
+
+    /// Gets an associative array entry.
+    pub fn get_assoc_elem(&self, name: &str, key: &str) -> &str {
+        let target = self.resolve_nameref(name);
+        self.assoc_arrays
+            .get(target)
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.as_str())
+            })
+            .unwrap_or("")
+    }
+
+    /// Returns keys/indices of an associative or indexed array (`${!arr[@]}`).
+    pub fn get_array_keys(&self, name: &str) -> Vec<String> {
+        let target = self.resolve_nameref(name);
+        if let Some(entries) = self.assoc_arrays.get(target) {
+            return entries.iter().map(|(k, _)| k.clone()).collect();
+        }
+        let len = self.array_len(target);
+        (0..len).map(|i| i.to_string()).collect()
+    }
+
+    /// Pushes a function name onto the `FUNCNAME` call stack (and `BASH_ARGV` if `extdebug`).
+    pub fn push_func(&mut self, name: &str) {
+        self.func_stack.push(name.to_owned());
+        self.argv_counts.push(0);
+    }
+
+    /// Pushes a function name and its arguments (for `shopt -s extdebug` `BASH_ARGV`).
+    pub fn push_func_with_args(&mut self, name: &str, args: &[&str]) {
+        self.func_stack.push(name.to_owned());
+        if self.shopt_extdebug {
+            let count = args.len();
+            self.argv_counts.push(count);
+            let argv = self.arrays.entry("BASH_ARGV".to_owned()).or_default();
+            let mut new_items: Vec<String> = args.iter().rev().map(|s| (*s).to_owned()).collect();
+            new_items.append(argv);
+            *argv = new_items;
+        } else {
+            self.argv_counts.push(0);
+        }
+    }
+
+    /// Pops the current function name from the `FUNCNAME` call stack.
+    pub fn pop_func(&mut self) {
+        self.func_stack.pop();
+        if let Some(count) = self.argv_counts.pop() {
+            if self.shopt_extdebug && count > 0 {
+                if let Some(argv) = self.arrays.get_mut("BASH_ARGV") {
+                    let drain_n = count.min(argv.len());
+                    argv.drain(0..drain_n);
+                }
+            }
+        }
+    }
+
+    /// Evaluates `[[ text =~ pattern ]]` and updates `BASH_REMATCH`.
+    pub fn test_regex_match(&mut self, text: &str, pattern: &str) -> bool {
+        match regex::Regex::new(pattern) {
+            Ok(re) => {
+                if let Some(caps) = re.captures(text) {
+                    let mut items = Vec::with_capacity(caps.len());
+                    for i in 0..caps.len() {
+                        items.push(
+                            caps.get(i)
+                                .map_or_else(String::new, |m| m.as_str().to_owned()),
+                        );
+                    }
+                    self.arrays.insert("BASH_REMATCH".to_owned(), items);
+                    true
+                } else {
+                    self.arrays.remove("BASH_REMATCH");
+                    false
+                }
+            }
+            Err(_) => {
+                self.arrays.remove("BASH_REMATCH");
+                false
+            }
+        }
     }
 
     /// Snapshot of scalar, array, and nameref shell variables for subshell isolation.
@@ -280,11 +424,17 @@ impl ShellState {
 
     /// Runs the registered `EXIT` trap at most once, if any.
     pub fn run_exit_trap(&mut self) {
-        if let (Some(handler), Some(dispatch)) = (self.exit_trap.take(), self.fn_dispatcher) {
-            let fn_name = handler.split_whitespace().next().unwrap_or("");
-            if !fn_name.is_empty() {
-                let _ = dispatch(self, fn_name, &[]);
+        if let Some(handler) = self.exit_trap.take() {
+            if let Some(dispatch) = self.fn_dispatcher {
+                let fn_name = handler.split_whitespace().next().unwrap_or("");
+                if !fn_name.is_empty() && handler.trim() == fn_name {
+                    if let Ok(Some(_)) = dispatch(self, fn_name, &[]) {
+                        return;
+                    }
+                }
             }
+            let lines: Vec<String> = handler.lines().map(str::to_owned).collect();
+            let _ = self.exec_sourced_lines(&lines);
         }
     }
 
@@ -421,7 +571,30 @@ impl ShellState {
                 Some((self.seconds_offset + elapsed).max(0).to_string())
             }
             "LINENO" => Some(line.to_string()),
-            _ => None,
+            "_" => Some(self.last_arg.clone()),
+            "BASH" => Some("/bin/bash".to_owned()),
+            "BASH_VERSION" => Some("5.3.20(1)-release".to_owned()),
+            "HOSTTYPE" => Some(std::env::consts::ARCH.to_owned()),
+            "FUNCNAME" => Some(self.func_stack.last().cloned().unwrap_or_default()),
+            "#" => Some(self.positional_args.len().to_string()),
+            "@" => Some(self.positional_args.join(" ")),
+            "*" => {
+                let refs: Vec<&str> = self.positional_args.iter().map(String::as_str).collect();
+                Some(self.join_positional_args(&refs))
+            }
+            _ => {
+                if let Ok(idx) = name.parse::<usize>() {
+                    if idx >= 1 {
+                        return Some(
+                            self.positional_args
+                                .get(idx - 1)
+                                .cloned()
+                                .unwrap_or_default(),
+                        );
+                    }
+                }
+                None
+            }
         }
     }
 
@@ -430,6 +603,20 @@ impl ShellState {
         let target = self.resolve_nameref(name);
         if let Some(v) = self.vars.get(target) {
             return v.clone();
+        }
+        if matches!(
+            target,
+            "_" | "RANDOM"
+                | "SECONDS"
+                | "LINENO"
+                | "BASH"
+                | "BASH_VERSION"
+                | "HOSTTYPE"
+                | "FUNCNAME"
+        ) {
+            if let Some(v) = self.resolve_special_var(target, line) {
+                return v;
+            }
         }
         if let Ok(v) = std::env::var(target) {
             return v;
@@ -465,12 +652,41 @@ impl ShellState {
     /// Returns a slice of a global shell array (empty slice if unset).
     pub fn get_array(&self, name: &str) -> &[String] {
         let target = self.resolve_nameref(name);
+        if target == "BASH_VERSINFO" {
+            static VERSINFO: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+            return VERSINFO
+                .get_or_init(|| {
+                    vec![
+                        "5".to_owned(),
+                        "3".to_owned(),
+                        "20".to_owned(),
+                        "1".to_owned(),
+                        "release".to_owned(),
+                        format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+                    ]
+                })
+                .as_slice();
+        }
         self.arrays.get(target).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Returns an element of a global shell array (or `""` if out of bounds).
     pub fn get_array_elem(&self, name: &str, idx: usize) -> &str {
         let target = self.resolve_nameref(name);
+        if target == "FUNCNAME" {
+            let len = self.func_stack.len();
+            if idx < len {
+                return self.func_stack[len - 1 - idx].as_str();
+            }
+            return "";
+        }
+        if target == "BASH_VERSINFO" {
+            return self
+                .get_array(target)
+                .get(idx)
+                .map(String::as_str)
+                .unwrap_or("");
+        }
         self.arrays
             .get(target)
             .and_then(|v| v.get(idx))
@@ -497,6 +713,15 @@ impl ShellState {
     /// Returns the length of a global shell array.
     pub fn array_len(&self, name: &str) -> usize {
         let target = self.resolve_nameref(name);
+        if target == "FUNCNAME" {
+            return self.func_stack.len();
+        }
+        if target == "BASH_VERSINFO" {
+            return 6;
+        }
+        if let Some(entries) = self.assoc_arrays.get(target) {
+            return entries.len();
+        }
         self.arrays.get(target).map_or(0, Vec::len)
     }
 
@@ -519,7 +744,7 @@ impl ShellState {
     pub fn pop_stdout_capture(&mut self) -> String {
         let buf = self.stdout_capture_stack.pop().unwrap_or_default();
         String::from_utf8_lossy(&buf)
-            .trim_end_matches(['\r', '\n'])
+            .trim_end_matches('\n')
             .to_owned()
     }
 
@@ -648,15 +873,19 @@ impl ShellState {
         env: &[(&str, &str)],
         redirects: &[RedirectSpec<'_>],
     ) -> RuntimeResult<i32> {
+        let next_last_arg = args.last().copied().unwrap_or(program).to_owned();
         if let Some(rc) = self.try_run_builtin(program, args, env, redirects)? {
+            self.last_arg = next_last_arg;
             return Ok(self.set_status(rc));
         }
         if redirects.is_empty() {
             if let Some(res) = self.call_sourced_fn(program, args) {
                 let rc = res?;
+                self.last_arg = next_last_arg;
                 return Ok(self.set_status(rc));
             }
         }
+        self.last_arg = next_last_arg;
 
         let mut stdin_data = self.stdin_override.take();
         let capture_stdout =
@@ -759,7 +988,10 @@ impl ShellState {
                 RedirectMode::DupStdoutToStderr => {
                     dup_1_to_2 = true;
                 }
-                RedirectMode::Input(_) | RedirectMode::InputBytes(_) | RedirectMode::CloseFd => {}
+                RedirectMode::Input(_)
+                | RedirectMode::InputBytes(_)
+                | RedirectMode::ReadWriteProcSubst
+                | RedirectMode::CloseFd => {}
             }
         }
 
@@ -915,13 +1147,15 @@ impl ShellState {
         String::new()
     }
 
-    /// Applies `set` builtin flags (`-e`/`+e`, `-u`/`+u`, `-o pipefail`/`+o pipefail`, and combined short flags like `-euo pipefail`).
-    pub fn apply_set_flags(&mut self, args: &[&str]) {
+    /// Applies `set` builtin flags (`-e`/`+e`, `-u`/`+u`, `-f`/`+f`, `-o pipefail`/`+o pipefail`, and `-- args...`).
+    /// Returns `true` if positional parameters (`--`) were updated.
+    pub fn apply_set_flags(&mut self, args: &[&str]) -> bool {
         let mut i = 0usize;
         while i < args.len() {
             let arg = args[i];
             if arg == "--" {
-                break;
+                self.positional_args = args[i + 1..].iter().map(|s| (*s).to_owned()).collect();
+                return true;
             }
             if let Some(rest) = arg.strip_prefix('-').or_else(|| arg.strip_prefix('+')) {
                 let enable = arg.starts_with('-');
@@ -933,12 +1167,14 @@ impl ShellState {
                     match ch {
                         'e' => self.errexit = enable,
                         'u' => self.nounset = enable,
+                        'f' => self.noglob = enable,
                         'o' if i + 1 < args.len() => {
                             i += 1;
                             match args[i] {
                                 "errexit" => self.errexit = enable,
                                 "nounset" => self.nounset = enable,
                                 "pipefail" => self.pipefail = enable,
+                                "noglob" => self.noglob = enable,
                                 _ => {}
                             }
                         }
@@ -948,6 +1184,7 @@ impl ShellState {
             }
             i += 1;
         }
+        false
     }
 
     fn emit_builtin_output(
@@ -1091,9 +1328,8 @@ impl ShellState {
             "type" => Ok(Some(self.builtin_type(args, redirects)?)),
             "let" => Ok(Some(self.builtin_let(args))),
             "declare" | "typeset" | "export" | "readonly" | "local" => {
-                self.builtin_declare(program, args);
-                self.emit_builtin_output("", redirects)?;
-                Ok(Some(0))
+                let rc = self.builtin_declare(program, args, redirects)?;
+                Ok(Some(rc))
             }
             "caller" => Ok(Some(1)),
             "exit" => {
@@ -1167,6 +1403,9 @@ impl ShellState {
                 Ok(Some(0))
             }
             "read" => Ok(Some(self.builtin_read(args, redirects)?)),
+            "mapfile" | "readarray" => Ok(Some(self.builtin_mapfile(args, redirects)?)),
+            "printf" => Ok(Some(self.builtin_printf(args, redirects)?)),
+            "shopt" => Ok(Some(self.builtin_shopt(args, redirects)?)),
             "echo" => Ok(Some(self.builtin_echo(args, redirects)?)),
             "unset" => {
                 let mut unset_nameref = false;
@@ -1205,9 +1444,9 @@ impl ShellState {
                 self.apply_captured_redirects(&captured, redirects)?;
                 Ok(Some(rc))
             }
-            "hash" | "ulimit" | "shopt" | "enable" | "wait" | "jobs" | "times" | "dirs"
-            | "shift" | "break" | "continue" | "exec" | "mapfile" | "readarray" | "pushd"
-            | "popd" | "getopts" | "alias" | "unalias" | "bg" | "fg" | "disown" => {
+            "hash" | "ulimit" | "enable" | "wait" | "jobs" | "times" | "dirs" | "shift"
+            | "break" | "continue" | "exec" | "pushd" | "popd" | "getopts" | "alias"
+            | "unalias" | "bg" | "fg" | "disown" => {
                 self.emit_builtin_output("", redirects)?;
                 Ok(Some(0))
             }
@@ -1548,10 +1787,18 @@ impl ShellState {
         }
     }
 
-    fn builtin_declare(&mut self, cmd: &str, args: &[&str]) {
+    fn builtin_declare(
+        &mut self,
+        cmd: &str,
+        args: &[&str],
+        redirects: &[RedirectSpec<'_>],
+    ) -> RuntimeResult<i32> {
         let mut export_var = cmd == "export";
         let mut is_array = false;
+        let mut is_assoc = false;
         let mut is_nameref = false;
+        let mut list_funcs = false;
+        let mut names_only = Vec::new();
         for &arg in args {
             if (arg.starts_with('-') || arg.starts_with('+')) && arg.len() > 1 {
                 if arg.contains('x') && arg.starts_with('-') {
@@ -1560,12 +1807,22 @@ impl ShellState {
                 if arg.contains('a') && arg.starts_with('-') {
                     is_array = true;
                 }
+                if arg.contains('A') && arg.starts_with('-') {
+                    is_assoc = true;
+                }
+                if arg.contains('F') && arg.starts_with('-') {
+                    list_funcs = true;
+                }
                 if arg.contains('n') && arg.starts_with('-') {
                     is_nameref = true;
                 }
                 if arg.contains('n') && arg.starts_with('+') {
                     is_nameref = false;
                 }
+                continue;
+            }
+            if list_funcs {
+                names_only.push(arg);
                 continue;
             }
             if is_nameref {
@@ -1606,6 +1863,12 @@ impl ShellState {
                         }
                     }
                 }
+            } else if is_assoc {
+                if !self.func_stack.is_empty() {
+                    self.assoc_arrays.insert(arg.to_owned(), Vec::new());
+                } else {
+                    self.assoc_arrays.entry(arg.to_owned()).or_default();
+                }
             } else if is_array {
                 self.arrays.entry(arg.to_owned()).or_default();
             } else if export_var {
@@ -1616,6 +1879,290 @@ impl ShellState {
                 }
             }
         }
+        if list_funcs {
+            let mut all_fns: Vec<String> = self.registered_functions.clone();
+            for k in self.sourced_functions.keys() {
+                if !all_fns.contains(k) {
+                    all_fns.push(k.clone());
+                }
+            }
+            all_fns.sort();
+            if names_only.is_empty() {
+                let mut out = String::new();
+                for f in &all_fns {
+                    out.push_str("declare -f ");
+                    out.push_str(f);
+                    out.push('\n');
+                }
+                self.emit_builtin_output(&out, redirects)?;
+                return Ok(0);
+            }
+            let mut out = String::new();
+            let mut all_ok = true;
+            for n in names_only {
+                if all_fns.iter().any(|f| f == n) {
+                    out.push_str(n);
+                    out.push('\n');
+                } else {
+                    all_ok = false;
+                }
+            }
+            self.emit_builtin_output(&out, redirects)?;
+            return Ok(if all_ok { 0 } else { 1 });
+        }
+        self.emit_builtin_output("", redirects)?;
+        Ok(0)
+    }
+
+    fn builtin_shopt(
+        &mut self,
+        args: &[&str],
+        redirects: &[RedirectSpec<'_>],
+    ) -> RuntimeResult<i32> {
+        let mut set_opt = false;
+        let mut unset_opt = false;
+        let mut quiet = false;
+        let mut opts = Vec::new();
+        for &arg in args {
+            if arg.starts_with('-') && arg.len() > 1 {
+                for ch in arg[1..].chars() {
+                    match ch {
+                        's' => set_opt = true,
+                        'u' => unset_opt = true,
+                        'q' => quiet = true,
+                        _ => {}
+                    }
+                }
+            } else {
+                opts.push(arg);
+            }
+        }
+        let mut ok = true;
+        for opt in opts {
+            match opt {
+                "checkwinsize" => {
+                    if set_opt {
+                        self.shopt_checkwinsize = true;
+                        self.refresh_winsize();
+                    } else if unset_opt {
+                        self.shopt_checkwinsize = false;
+                    } else if !quiet {
+                        let state = if self.shopt_checkwinsize { "on" } else { "off" };
+                        self.emit_builtin_output(&format!("checkwinsize\t{state}\n"), redirects)?;
+                    } else if !self.shopt_checkwinsize {
+                        ok = false;
+                    }
+                }
+                "extdebug" => {
+                    if set_opt {
+                        self.shopt_extdebug = true;
+                    } else if unset_opt {
+                        self.shopt_extdebug = false;
+                    } else if !quiet {
+                        let state = if self.shopt_extdebug { "on" } else { "off" };
+                        self.emit_builtin_output(&format!("extdebug\t{state}\n"), redirects)?;
+                    } else if !self.shopt_extdebug {
+                        ok = false;
+                    }
+                }
+                _ => {
+                    if !set_opt && !unset_opt {
+                        ok = false;
+                    }
+                }
+            }
+        }
+        Ok(if ok { 0 } else { 1 })
+    }
+
+    fn refresh_winsize(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            let mut ws: libc::winsize = std::mem::zeroed();
+            for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+                if libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_row > 0 && ws.ws_col > 0
+                {
+                    self.set_var("LINES", ws.ws_row.to_string());
+                    self.set_var("COLUMNS", ws.ws_col.to_string());
+                    return;
+                }
+            }
+        }
+        if self.get_var("LINES").is_none() {
+            if let Ok(v) = std::env::var("LINES") {
+                self.set_var("LINES", v);
+            }
+        }
+        if self.get_var("COLUMNS").is_none() {
+            if let Ok(v) = std::env::var("COLUMNS") {
+                self.set_var("COLUMNS", v);
+            }
+        }
+    }
+
+    fn builtin_mapfile(
+        &mut self,
+        args: &[&str],
+        redirects: &[RedirectSpec<'_>],
+    ) -> RuntimeResult<i32> {
+        let mut strip_delim = false;
+        let mut max_count: Option<usize> = None;
+        let mut skip_count: usize = 0;
+        let mut origin: Option<usize> = None;
+        let mut delim: u8 = b'\n';
+        let mut array_name = "MAPFILE";
+        let mut idx = 0usize;
+        let mut end_of_opts = false;
+
+        while idx < args.len() {
+            let arg = args[idx];
+            if !end_of_opts && arg == "--" {
+                end_of_opts = true;
+                idx += 1;
+                continue;
+            }
+            if !end_of_opts && arg.starts_with('-') && arg.len() > 1 {
+                let chars: Vec<char> = arg[1..].chars().collect();
+                let mut c_idx = 0usize;
+                while c_idx < chars.len() {
+                    match chars[c_idx] {
+                        't' => strip_delim = true,
+                        'n' if c_idx + 1 == chars.len() && idx + 1 < args.len() => {
+                            idx += 1;
+                            let n = args[idx].trim().parse::<usize>().unwrap_or(0);
+                            max_count = if n == 0 { None } else { Some(n) };
+                        }
+                        's' if c_idx + 1 == chars.len() && idx + 1 < args.len() => {
+                            idx += 1;
+                            skip_count = args[idx].trim().parse::<usize>().unwrap_or(0);
+                        }
+                        'O' if c_idx + 1 == chars.len() && idx + 1 < args.len() => {
+                            idx += 1;
+                            origin = args[idx].trim().parse::<usize>().ok();
+                        }
+                        'd' if c_idx + 1 == chars.len() && idx + 1 < args.len() => {
+                            idx += 1;
+                            delim = args[idx].as_bytes().first().copied().unwrap_or(0);
+                        }
+                        'C' | 'c' | 'u' if c_idx + 1 == chars.len() && idx + 1 < args.len() => {
+                            idx += 1;
+                        }
+                        _ => {}
+                    }
+                    c_idx += 1;
+                }
+            } else {
+                array_name = arg;
+            }
+            idx += 1;
+        }
+
+        let mut input_bytes = None;
+        for spec in redirects {
+            if spec.fd == 0 {
+                match spec.mode {
+                    RedirectMode::Input(path) => {
+                        input_bytes = Some(fs::read(path).map_err(|source| RuntimeError::Io {
+                            program: "mapfile".to_owned(),
+                            source,
+                        })?);
+                    }
+                    RedirectMode::InputBytes(bytes) => {
+                        input_bytes = Some(bytes.to_vec());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let raw = if let Some(b) = input_bytes {
+            b
+        } else if let Some(b) = self.stdin_override.take() {
+            b
+        } else {
+            use std::io::Read;
+            let mut b = Vec::new();
+            let _ = io::stdin().read_to_end(&mut b);
+            b
+        };
+
+        let mut lines = Vec::new();
+        let mut start = 0usize;
+        let mut skipped = 0usize;
+        for (pos, &b) in raw.iter().enumerate() {
+            if b == delim {
+                let end = if strip_delim { pos } else { pos + 1 };
+                if skipped < skip_count {
+                    skipped += 1;
+                } else {
+                    lines.push(String::from_utf8_lossy(&raw[start..end]).into_owned());
+                    if max_count.is_some_and(|m| lines.len() >= m) {
+                        start = pos + 1;
+                        break;
+                    }
+                }
+                start = pos + 1;
+            }
+        }
+        if start < raw.len() && max_count.is_none_or(|m| lines.len() < m) && skipped >= skip_count {
+            lines.push(String::from_utf8_lossy(&raw[start..]).into_owned());
+        }
+
+        if let Some(orig) = origin {
+            for (i, line) in lines.into_iter().enumerate() {
+                self.set_array_elem(array_name, orig + i, line);
+            }
+        } else {
+            self.set_array(array_name, lines);
+        }
+        Ok(0)
+    }
+
+    fn builtin_printf(
+        &mut self,
+        args: &[&str],
+        redirects: &[RedirectSpec<'_>],
+    ) -> RuntimeResult<i32> {
+        let mut target_var: Option<&str> = None;
+        let mut idx = 0usize;
+        while idx < args.len() {
+            if args[idx] == "-v" && idx + 1 < args.len() {
+                target_var = Some(args[idx + 1]);
+                idx += 2;
+            } else if args[idx] == "--" {
+                idx += 1;
+                break;
+            } else {
+                break;
+            }
+        }
+        if idx >= args.len() {
+            return Ok(0);
+        }
+        let fmt = args[idx];
+        let val_args = &args[idx + 1..];
+        let mut out = String::new();
+        let mut arg_i = 0usize;
+        let start_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+            - (self.start_instant.elapsed().as_secs() as i64);
+
+        loop {
+            let prev_arg_i = arg_i;
+            let formatted = format_bash_printf(fmt, val_args, &mut arg_i, start_epoch);
+            out.push_str(&formatted);
+            if arg_i >= val_args.len() || arg_i == prev_arg_i {
+                break;
+            }
+        }
+
+        if let Some(var_name) = target_var {
+            self.set_var(var_name, out);
+        } else {
+            self.emit_builtin_output(&out, redirects)?;
+        }
+        Ok(0)
     }
 
     fn builtin_echo(
@@ -1691,8 +2238,11 @@ impl ShellState {
         redirects: &[RedirectSpec<'_>],
     ) -> RuntimeResult<i32> {
         let mut raw_mode = false;
+        let mut silent = false;
         let mut prompt: Option<&str> = None;
         let mut nchars: Option<usize> = None;
+        let mut timeout_secs: Option<f64> = None;
+        let mut has_u_flag = false;
         let mut delim: u8 = b'\n';
         let mut array_var: Option<&str> = None;
         let mut var_names: Vec<&str> = Vec::new();
@@ -1711,7 +2261,8 @@ impl ShellState {
                 let mut c_idx = 0usize;
                 while c_idx < chars.len() {
                     match chars[c_idx] {
-                        'r' | 's' => {}
+                        'r' => raw_mode = true,
+                        's' => silent = true,
                         'p' => {
                             if c_idx + 1 == chars.len() && idx + 1 < args.len() {
                                 idx += 1;
@@ -1736,13 +2287,19 @@ impl ShellState {
                                 array_var = Some(args[idx]);
                             }
                         }
-                        't' | 'u' if c_idx + 1 == chars.len() && idx + 1 < args.len() => {
-                            idx += 1;
+                        't' => {
+                            if c_idx + 1 == chars.len() && idx + 1 < args.len() {
+                                idx += 1;
+                                timeout_secs = args[idx].trim().parse::<f64>().ok();
+                            }
+                        }
+                        'u' => {
+                            has_u_flag = true;
+                            if c_idx + 1 == chars.len() && idx + 1 < args.len() {
+                                idx += 1;
+                            }
                         }
                         _ => {}
-                    }
-                    if chars[c_idx] == 'r' {
-                        raw_mode = true;
                     }
                     c_idx += 1;
                 }
@@ -1754,6 +2311,19 @@ impl ShellState {
 
         if let Some(p) = prompt {
             self.emit_builtin_stderr(p, redirects);
+        }
+
+        let has_rw_proc_subst = redirects
+            .iter()
+            .any(|r| matches!(r.mode, RedirectMode::ReadWriteProcSubst));
+        if has_rw_proc_subst || has_u_flag {
+            if let Some(t) = timeout_secs {
+                if t > 0.0 {
+                    std::thread::sleep(std::time::Duration::from_secs_f64(t));
+                }
+                return Ok(142);
+            }
+            return Ok(1);
         }
 
         // Read from input redirect `< file` / `<<<` / `<<`, else `stdin_override`, else `io::stdin()`.
@@ -1807,30 +2377,98 @@ impl ShellState {
                 got_eof = true;
             }
         } else {
-            use std::io::Read;
-            let stdin = io::stdin();
-            let mut handle = stdin.lock();
+            #[cfg(unix)]
+            let saved_termios = {
+                let mut orig: libc::termios = unsafe { std::mem::zeroed() };
+                if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1
+                    && (delim != b'\n' || nchars.is_some() || silent)
+                    && unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut orig) } == 0
+                {
+                    let mut raw = orig;
+                    if delim != b'\n' || nchars.is_some() {
+                        raw.c_lflag &= !(libc::ICANON);
+                        raw.c_cc[libc::VMIN] = 1;
+                        raw.c_cc[libc::VTIME] = 0;
+                    }
+                    if silent {
+                        raw.c_lflag &= !(libc::ECHO);
+                    }
+                    unsafe {
+                        libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
+                    }
+                    Some(orig)
+                } else {
+                    None
+                }
+            };
+
             let mut byte = [0u8; 1];
             let mut read_any = false;
             let mut hit_delim = false;
+            let mut timed_out = false;
+            let deadline = timeout_secs
+                .map(|t| Instant::now() + std::time::Duration::from_secs_f64(t.max(0.0)));
             loop {
                 if let Some(n) = nchars {
                     if line_bytes.len() >= n {
                         break;
                     }
                 }
-                match handle.read(&mut byte) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        read_any = true;
-                        if nchars.is_none() && byte[0] == delim {
-                            hit_delim = true;
-                            break;
-                        }
-                        line_bytes.push(byte[0]);
+                #[cfg(unix)]
+                if let Some(dl) = deadline {
+                    let rem_ms = dl
+                        .saturating_duration_since(Instant::now())
+                        .as_millis()
+                        .min(i32::MAX as u128) as i32;
+                    let mut pfd = libc::pollfd {
+                        fd: libc::STDIN_FILENO,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    let prc = unsafe { libc::poll(&mut pfd, 1, rem_ms) };
+                    if prc <= 0 {
+                        timed_out = true;
+                        break;
                     }
-                    Err(_) => break,
                 }
+                #[cfg(unix)]
+                let nread = unsafe {
+                    libc::read(
+                        libc::STDIN_FILENO,
+                        byte.as_mut_ptr().cast::<libc::c_void>(),
+                        1,
+                    )
+                };
+                #[cfg(not(unix))]
+                let nread = {
+                    use std::io::Read;
+                    match io::stdin().read(&mut byte) {
+                        Ok(n) => n as isize,
+                        Err(_) => -1,
+                    }
+                };
+                if nread <= 0 {
+                    break;
+                }
+                read_any = true;
+                if nchars.is_none() && byte[0] == delim {
+                    hit_delim = true;
+                    break;
+                }
+                line_bytes.push(byte[0]);
+            }
+            #[cfg(unix)]
+            if let Some(orig) = saved_termios {
+                unsafe {
+                    libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &orig);
+                }
+            }
+            if timed_out {
+                let line = String::from_utf8_lossy(&line_bytes)
+                    .trim_end_matches('\r')
+                    .to_owned();
+                self.assign_read_vars(&line, raw_mode, array_var, &var_names);
+                return Ok(142);
             }
             got_eof = !read_any || (!hit_delim && nchars.is_none() && line_bytes.is_empty());
             if read_any && !hit_delim && nchars.is_none() && !line_bytes.is_empty() {
@@ -2453,6 +3091,7 @@ pub enum RedirectMode<'a> {
     OutputAppend(&'a str),
     Input(&'a str),
     InputBytes(&'a [u8]),
+    ReadWriteProcSubst,
     DupOutput { target_fd: u32 },
     DupStdoutToStderr,
     CloseFd,
@@ -3170,6 +3809,49 @@ pub fn test_regex_match(text: &str, pattern: &str) -> bool {
     regex::Regex::new(pattern).is_ok_and(|re| re.is_match(text))
 }
 
+/// Equivalent to Bash case modification `${var^}`, `${var^^}`, `${var,}`, `${var,,}`, `${var~}`, `${var~~}`.
+pub fn param_case_modify(val: &str, pattern: &str, mode: &str) -> String {
+    let all = matches!(mode, "upper_all" | "lower_all" | "toggle_all");
+    let mut out = String::with_capacity(val.len());
+    let mut modified_first = false;
+    for ch in val.chars() {
+        let should_apply = (all || !modified_first)
+            && (pattern.is_empty() || glob_match(pattern, &ch.to_string()));
+        if should_apply {
+            modified_first = true;
+            match mode {
+                "upper_first" | "upper_all" => {
+                    for uc in ch.to_uppercase() {
+                        out.push(uc);
+                    }
+                }
+                "lower_first" | "lower_all" => {
+                    for lc in ch.to_lowercase() {
+                        out.push(lc);
+                    }
+                }
+                "toggle_first" | "toggle_all" => {
+                    if ch.is_uppercase() {
+                        for lc in ch.to_lowercase() {
+                            out.push(lc);
+                        }
+                    } else if ch.is_lowercase() {
+                        for uc in ch.to_uppercase() {
+                            out.push(uc);
+                        }
+                    } else {
+                        out.push(ch);
+                    }
+                }
+                _ => out.push(ch),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Equivalent to Bash `[ -n s ]`.
 pub fn test_str_non_empty(s: &str) -> bool {
     !s.is_empty()
@@ -3227,7 +3909,7 @@ fn parse_int_pair(a: &str, b: &str) -> Option<(i64, i64)> {
 }
 
 fn trim_trailing_newlines(s: &str) -> &str {
-    s.trim_end_matches(['\r', '\n'])
+    s.trim_end_matches('\n')
 }
 
 struct ArithParser<'a> {
@@ -3265,15 +3947,79 @@ impl<'a> ArithParser<'a> {
         }
     }
 
-    fn read_var_i64(&self, name: &str) -> i64 {
-        let raw = self
-            .shell
+    fn read_var_str(&self, name: &str) -> String {
+        if let Some(v) = self.shell.resolve_special_var(name, 0) {
+            return v;
+        }
+        self.shell
             .vars
             .get(name)
             .cloned()
             .or_else(|| std::env::var(name).ok())
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    fn read_var_i64(&self, name: &str) -> i64 {
+        let raw = self.read_var_str(name);
         parse_int_str(&raw)
+    }
+
+    fn eval_arith_param(&mut self, inner: &str) -> String {
+        if let Some((var_name, def_val)) = inner.split_once(":=") {
+            let cur = self.read_var_str(var_name.trim());
+            if cur.is_empty() {
+                self.shell.set_var(var_name.trim(), def_val);
+                return def_val.to_owned();
+            }
+            return cur;
+        }
+        if let Some((var_name, def_val)) = inner.split_once('=') {
+            let vn = var_name.trim();
+            if self.shell.get_var(vn).is_none() && std::env::var(vn).is_err() {
+                self.shell.set_var(vn, def_val);
+                return def_val.to_owned();
+            }
+            return self.read_var_str(vn);
+        }
+        if let Some(rest) = inner.strip_prefix('#') {
+            if let Some(arr_name) = rest
+                .strip_suffix("[@]")
+                .or_else(|| rest.strip_suffix("[*]"))
+            {
+                return self.shell.array_len(arr_name.trim()).to_string();
+            }
+            return self.read_var_str(rest).chars().count().to_string();
+        }
+        if let Some(colon_pos) = inner.find(':') {
+            let var_name = inner[..colon_pos].trim();
+            let slice_spec = &inner[colon_pos + 1..];
+            if !slice_spec.starts_with('-')
+                && !slice_spec.starts_with('=')
+                && !slice_spec.starts_with('+')
+                && !slice_spec.starts_with('?')
+            {
+                let val = self.read_var_str(var_name);
+                let mut parts = slice_spec.splitn(2, ':');
+                let off_s = parts.next().unwrap_or("0").trim();
+                let off = parse_int_str(off_s);
+                let chars: Vec<char> = val.chars().collect();
+                let start = if off < 0 {
+                    chars.len().saturating_sub(off.unsigned_abs() as usize)
+                } else {
+                    (off as usize).min(chars.len())
+                };
+                if let Some(len_s) = parts.next() {
+                    let len = parse_int_str(len_s.trim());
+                    if len <= 0 {
+                        return String::new();
+                    }
+                    let end = start.saturating_add(len as usize).min(chars.len());
+                    return chars[start..end].iter().collect();
+                }
+                return chars[start..].iter().collect();
+            }
+        }
+        self.read_var_str(inner)
     }
 
     fn write_var_i64(&mut self, name: &str, val: i64) -> i64 {
@@ -3339,16 +4085,37 @@ impl<'a> ArithParser<'a> {
         self.parse_ternary()
     }
 
+    fn skip_ternary_branch(&mut self, stop_on_colon: bool) {
+        let mut depth = 0usize;
+        while self.pos < self.src.len() {
+            let b = self.src[self.pos];
+            if b == b'(' {
+                depth += 1;
+            } else if b == b')' {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            } else if depth == 0 && (b == b',' || (stop_on_colon && b == b':')) {
+                break;
+            }
+            self.pos += 1;
+        }
+    }
+
     fn parse_ternary(&mut self) -> i64 {
         let cond = self.parse_log_or();
         if self.eat(b"?") {
-            let then_v = self.parse_comma();
-            let _ = self.eat(b":");
-            let else_v = self.parse_ternary();
             if cond != 0 {
+                let then_v = self.parse_comma();
+                if self.eat(b":") {
+                    self.skip_ternary_branch(false);
+                }
                 then_v
             } else {
-                else_v
+                self.skip_ternary_branch(true);
+                let _ = self.eat(b":");
+                self.parse_ternary()
             }
         } else {
             cond
@@ -3541,7 +4308,7 @@ impl<'a> ArithParser<'a> {
             return 0;
         }
 
-        // `${#arr[@]}` / `${#arr[*]}` / `${#var}` / `${var}`
+        // `${#arr[@]}` / `${#arr[*]}` / `${#var}` / `${var:off:len}` / `${var}`
         if self.src[self.pos..].starts_with(b"${") {
             self.pos += 2;
             if let Some(rel_end) = self.src[self.pos..].iter().position(|&b| b == b'}') {
@@ -3549,43 +4316,71 @@ impl<'a> ArithParser<'a> {
                     .unwrap_or("")
                     .trim();
                 self.pos += rel_end + 1;
-                if let Some(rest) = inner.strip_prefix('#') {
-                    if let Some(arr_name) = rest
-                        .strip_suffix("[@]")
-                        .or_else(|| rest.strip_suffix("[*]"))
-                    {
-                        return self.shell.array_len(arr_name.trim()) as i64;
-                    }
-                    let len = self
-                        .shell
-                        .vars
-                        .get(rest)
-                        .cloned()
-                        .or_else(|| std::env::var(rest).ok())
-                        .map_or(0, |v| v.chars().count());
-                    return len as i64;
-                }
-                return self.read_var_i64(inner);
+                let expanded = self.eval_arith_param(inner);
+                return parse_int_str(&expanded);
             }
             return 0;
         }
 
-        // `$var`
+        // `$var` or `$1`..`$9` or `$_`
         if self.src[self.pos] == b'$' {
             self.pos += 1;
+            if self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() {
+                let d = self.src[self.pos] as char;
+                self.pos += 1;
+                let name = d.to_string();
+                return self.read_var_i64(&name);
+            }
             if let Some(name) = self.try_parse_bare_ident() {
                 return self.read_var_i64(&name);
             }
             return 0;
         }
 
-        // Integer literal (hex `0x...` or decimal)
+        // Integer literal (`base#digits`, hex `0x...`, or decimal)
         if self.src[self.pos].is_ascii_digit() {
             let start = self.pos;
             while self.pos < self.src.len()
                 && (self.src[self.pos].is_ascii_alphanumeric() || self.src[self.pos] == b'_')
             {
                 self.pos += 1;
+            }
+            if self.pos < self.src.len() && self.src[self.pos] == b'#' {
+                let base_str = std::str::from_utf8(&self.src[start..self.pos]).unwrap_or("10");
+                let base = base_str.parse::<u32>().unwrap_or(10);
+                self.pos += 1;
+                let digits_str = if self.src[self.pos..].starts_with(b"${") {
+                    self.pos += 2;
+                    if let Some(rel_end) = self.src[self.pos..].iter().position(|&b| b == b'}') {
+                        let inner = std::str::from_utf8(&self.src[self.pos..self.pos + rel_end])
+                            .unwrap_or("")
+                            .trim();
+                        self.pos += rel_end + 1;
+                        self.eval_arith_param(inner)
+                    } else {
+                        String::new()
+                    }
+                } else if self.src[self.pos..].starts_with(b"$") {
+                    self.pos += 1;
+                    if let Some(name) = self.try_parse_bare_ident() {
+                        self.read_var_str(&name)
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    let d_start = self.pos;
+                    while self.pos < self.src.len()
+                        && (self.src[self.pos].is_ascii_alphanumeric()
+                            || self.src[self.pos] == b'_'
+                            || self.src[self.pos] == b'@')
+                    {
+                        self.pos += 1;
+                    }
+                    std::str::from_utf8(&self.src[d_start..self.pos])
+                        .unwrap_or("0")
+                        .to_owned()
+                };
+                return parse_base_int(&digits_str, base);
             }
             let tok = std::str::from_utf8(&self.src[start..self.pos]).unwrap_or("0");
             return parse_int_str(tok);
@@ -3638,10 +4433,423 @@ impl<'a> ArithParser<'a> {
     }
 }
 
+fn parse_printf_int(arg: &str) -> i64 {
+    if let Some(rest) = arg.strip_prefix('\'').or_else(|| arg.strip_prefix('"')) {
+        return rest.bytes().next().map_or(0, |b| b as i64);
+    }
+    parse_int_str(arg)
+}
+
+fn unescape_printf_str(s: &str, stop_on_c: bool) -> (String, bool) {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('\\') => out.push('\\'),
+                Some('a') => out.push('\x07'),
+                Some('b') => out.push('\x08'),
+                Some('f') => out.push('\x0c'),
+                Some('v') => out.push('\x0b'),
+                Some('e') | Some('E') => out.push('\x1b'),
+                Some('c') if stop_on_c => return (out, true),
+                Some('x') => {
+                    let mut hex = String::new();
+                    for _ in 0..2 {
+                        if let Some(&nc) = chars.peek() {
+                            if nc.is_ascii_hexdigit() {
+                                hex.push(nc);
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    if let Ok(v) = u8::from_str_radix(&hex, 16) {
+                        out.push(v as char);
+                    }
+                }
+                Some(d @ '0'..='7') => {
+                    let mut oct = String::from(d);
+                    for _ in 0..2 {
+                        if let Some(&nc) = chars.peek() {
+                            if ('0'..='7').contains(&nc) {
+                                oct.push(nc);
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    if let Ok(v) = u8::from_str_radix(&oct, 8) {
+                        out.push(v as char);
+                    }
+                }
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    (out, false)
+}
+
+fn format_strftime(fmt: &str, epoch_opt: Option<i64>, start_epoch: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let ts = match epoch_opt {
+        None | Some(-1) => now,
+        Some(-2) => start_epoch,
+        Some(v) => v,
+    };
+    #[cfg(unix)]
+    {
+        let t = ts as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe extern "C" {
+            fn tzset();
+        }
+        unsafe {
+            tzset();
+            libc::localtime_r(&t, &mut tm);
+        }
+        let c_fmt = std::ffi::CString::new(fmt).unwrap_or_default();
+        let mut buf = vec![0u8; 256];
+        let n = unsafe {
+            libc::strftime(
+                buf.as_mut_ptr().cast::<libc::c_char>(),
+                buf.len(),
+                c_fmt.as_ptr(),
+                &tm,
+            )
+        };
+        if n > 0 {
+            return String::from_utf8_lossy(&buf[..n]).into_owned();
+        }
+    }
+    let _ = ts;
+    String::new()
+}
+
+fn format_bash_printf(fmt: &str, args: &[&str], arg_i: &mut usize, start_epoch: i64) -> String {
+    let bytes = fmt.as_bytes();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            let mut j = i + 1;
+            if j < bytes.len() {
+                if bytes[j] == b'x' {
+                    j += 1;
+                    while j < bytes.len() && j < i + 4 && bytes[j].is_ascii_hexdigit() {
+                        j += 1;
+                    }
+                } else if (b'0'..=b'7').contains(&bytes[j]) {
+                    j += 1;
+                    while j < bytes.len() && j < i + 4 && (b'0'..=b'7').contains(&bytes[j]) {
+                        j += 1;
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+            let (unesc, _) = unescape_printf_str(&fmt[i..j], false);
+            out.push_str(&unesc);
+            i = j;
+            continue;
+        }
+        if bytes[i] != b'%' {
+            let ch = fmt[i..].chars().next().expect("valid utf8");
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        i += 1;
+        if i < bytes.len() && bytes[i] == b'%' {
+            out.push('%');
+            i += 1;
+            continue;
+        }
+        // `%(fmt)T`
+        if i < bytes.len() && bytes[i] == b'(' {
+            if let Some(close_rel) = fmt[i + 1..].find(")T") {
+                let tfmt = &fmt[i + 1..i + 1 + close_rel];
+                let epoch_opt = if *arg_i < args.len() {
+                    let s = args[*arg_i];
+                    *arg_i += 1;
+                    if s.is_empty() {
+                        None
+                    } else {
+                        Some(parse_printf_int(s))
+                    }
+                } else {
+                    None
+                };
+                out.push_str(&format_strftime(tfmt, epoch_opt, start_epoch));
+                i += 1 + close_rel + 2;
+                continue;
+            }
+        }
+        // Flags
+        let mut left_align = false;
+        let mut zero_pad = false;
+        let mut plus_sign = false;
+        let mut space_sign = false;
+        while i < bytes.len() && matches!(bytes[i], b'-' | b'0' | b'+' | b' ' | b'#') {
+            match bytes[i] {
+                b'-' => left_align = true,
+                b'0' => zero_pad = true,
+                b'+' => plus_sign = true,
+                b' ' => space_sign = true,
+                _ => {}
+            }
+            i += 1;
+        }
+        // Width
+        let mut width: Option<usize> = None;
+        if i < bytes.len() && bytes[i] == b'*' {
+            i += 1;
+            let w = if *arg_i < args.len() {
+                let v = parse_printf_int(args[*arg_i]);
+                *arg_i += 1;
+                v
+            } else {
+                0
+            };
+            if w < 0 {
+                left_align = true;
+                width = Some(w.unsigned_abs() as usize);
+            } else {
+                width = Some(w as usize);
+            }
+        } else {
+            let w_start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i > w_start {
+                width = fmt[w_start..i].parse::<usize>().ok();
+            }
+        }
+        // Precision
+        let mut precision: Option<usize> = None;
+        if i < bytes.len() && bytes[i] == b'.' {
+            i += 1;
+            if i < bytes.len() && bytes[i] == b'*' {
+                i += 1;
+                let p = if *arg_i < args.len() {
+                    let v = parse_printf_int(args[*arg_i]);
+                    *arg_i += 1;
+                    v
+                } else {
+                    0
+                };
+                precision = Some(p.max(0) as usize);
+            } else {
+                let p_start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                precision = Some(fmt[p_start..i].parse::<usize>().unwrap_or(0));
+            }
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let spec = bytes[i] as char;
+        i += 1;
+        let arg = if *arg_i < args.len() {
+            let a = args[*arg_i];
+            *arg_i += 1;
+            a
+        } else {
+            ""
+        };
+        let rendered = match spec {
+            's' => {
+                let mut s = arg.to_owned();
+                if let Some(p) = precision {
+                    s = s.chars().take(p).collect();
+                }
+                s
+            }
+            'b' => {
+                let (mut s, stop) = unescape_printf_str(arg, true);
+                if let Some(p) = precision {
+                    s = s.chars().take(p).collect();
+                }
+                if stop {
+                    out.push_str(&pad_printf(&s, width, left_align, false));
+                    return out;
+                }
+                s
+            }
+            'c' => arg
+                .chars()
+                .next()
+                .map(|c| c.to_string())
+                .unwrap_or_default(),
+            'd' | 'i' => {
+                let v = parse_printf_int(arg);
+                let sign = if v < 0 {
+                    "-"
+                } else if plus_sign {
+                    "+"
+                } else if space_sign {
+                    " "
+                } else {
+                    ""
+                };
+                let digits = v.unsigned_abs().to_string();
+                format_num_pad(sign, &digits, width, precision, left_align, zero_pad)
+            }
+            'u' => {
+                let v = parse_printf_int(arg) as u64;
+                format_num_pad("", &v.to_string(), width, precision, left_align, zero_pad)
+            }
+            'o' => {
+                let v = parse_printf_int(arg) as u64;
+                format_num_pad(
+                    "",
+                    &format!("{v:o}"),
+                    width,
+                    precision,
+                    left_align,
+                    zero_pad,
+                )
+            }
+            'x' => {
+                let v = parse_printf_int(arg) as u64;
+                format_num_pad(
+                    "",
+                    &format!("{v:x}"),
+                    width,
+                    precision,
+                    left_align,
+                    zero_pad,
+                )
+            }
+            'X' => {
+                let v = parse_printf_int(arg) as u64;
+                format_num_pad(
+                    "",
+                    &format!("{v:X}"),
+                    width,
+                    precision,
+                    left_align,
+                    zero_pad,
+                )
+            }
+            'f' | 'F' => {
+                let v = arg.trim().parse::<f64>().unwrap_or(0.0);
+                let p = precision.unwrap_or(6);
+                format!("{v:.p$}")
+            }
+            _ => arg.to_owned(),
+        };
+        if matches!(spec, 's' | 'b' | 'c' | 'f' | 'F') {
+            out.push_str(&pad_printf(&rendered, width, left_align, false));
+        } else {
+            out.push_str(&rendered);
+        }
+    }
+    out
+}
+
+fn pad_printf(s: &str, width: Option<usize>, left_align: bool, zero_pad: bool) -> String {
+    let Some(w) = width else {
+        return s.to_owned();
+    };
+    let len = s.chars().count();
+    if len >= w {
+        return s.to_owned();
+    }
+    let pad_ch = if zero_pad && !left_align { '0' } else { ' ' };
+    let pad: String = std::iter::repeat_n(pad_ch, w - len).collect();
+    if left_align {
+        format!("{s}{pad}")
+    } else {
+        format!("{pad}{s}")
+    }
+}
+
+fn format_num_pad(
+    sign: &str,
+    digits: &str,
+    width: Option<usize>,
+    precision: Option<usize>,
+    left_align: bool,
+    zero_pad: bool,
+) -> String {
+    let prec_digits = match precision {
+        Some(p) if digits.len() < p => {
+            let z: String = std::iter::repeat_n('0', p - digits.len()).collect();
+            format!("{z}{digits}")
+        }
+        _ => digits.to_owned(),
+    };
+    let total_len = sign.len() + prec_digits.len();
+    let Some(w) = width else {
+        return format!("{sign}{prec_digits}");
+    };
+    if total_len >= w {
+        return format!("{sign}{prec_digits}");
+    }
+    let pad_len = w - total_len;
+    if zero_pad && !left_align && precision.is_none() {
+        let z: String = std::iter::repeat_n('0', pad_len).collect();
+        format!("{sign}{z}{prec_digits}")
+    } else {
+        let sp: String = std::iter::repeat_n(' ', pad_len).collect();
+        if left_align {
+            format!("{sign}{prec_digits}{sp}")
+        } else {
+            format!("{sp}{sign}{prec_digits}")
+        }
+    }
+}
+
+fn parse_base_int(digits: &str, base: u32) -> i64 {
+    if !(2..=64).contains(&base) {
+        return 0;
+    }
+    let mut acc: i64 = 0;
+    for b in digits.trim().bytes() {
+        let d = match b {
+            b'0'..=b'9' => (b - b'0') as u32,
+            b'a'..=b'z' => (b - b'a' + 10) as u32,
+            b'A'..=b'Z' => (b - b'A' + (if base <= 36 { 10 } else { 36 })) as u32,
+            b'@' => 62,
+            b'_' => 63,
+            _ => return 0,
+        };
+        if d >= base {
+            return 0;
+        }
+        acc = acc.wrapping_mul(base as i64).wrapping_add(d as i64);
+    }
+    acc
+}
+
 fn parse_int_str(s: &str) -> i64 {
     let t = s.trim();
     if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         i64::from_str_radix(hex, 16).unwrap_or(0)
+    } else if let Some((base_s, digits)) = t.split_once('#') {
+        if let Ok(base) = base_s.parse::<u32>() {
+            parse_base_int(digits, base)
+        } else {
+            0
+        }
     } else {
         t.parse::<i64>().unwrap_or(0)
     }

@@ -108,6 +108,7 @@ pub enum RedirectKind {
     HereString,
     HereDoc { strip_tabs: bool },
     InputProcSubst,
+    ReadWriteProcSubst,
     DupOutput { target_fd: u32 },
     CloseFd,
 }
